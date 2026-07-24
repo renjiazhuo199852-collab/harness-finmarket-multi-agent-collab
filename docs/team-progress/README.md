@@ -29,6 +29,12 @@ docs/team-progress/<github-username>/
 
 推荐优先使用 Markdown 作为可审查的主文档；Word、PowerPoint 和 PDF 可放入 `attachments/` 作为附件。
 
+## 团队共享文档
+
+### 金融领域专业词汇表
+
+- [实时词汇表](https://lcni9tj1o4ng.feishu.cn/wiki/RgXswTZnQieEHRk9TIBcQxCGnGJ?from=from_copylink)
+
 ## 提交规则
 
 1. 每位成员原则上只修改自己的 GitHub 用户名目录。
