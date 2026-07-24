@@ -52,6 +52,11 @@ data/backup/
 
 # Internal docs (plans, specs)
 docs/
+# Keep team progress documents version-controlled.
+!/docs/
+/docs/*
+!/docs/team-progress/
+!/docs/team-progress/**
 !wiki/docs/
 !wiki/docs/**
 docs/screenshots/agent-run.png
