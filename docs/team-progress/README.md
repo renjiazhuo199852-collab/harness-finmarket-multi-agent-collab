@@ -17,24 +17,8 @@ docs/team-progress/example-user/
 
 推荐个人目录结构
 docs/team-progress/<github-username>/
-├── README.md
-├── progress/
-├── design/
-└── attachments/
 
 成员可以按实际需要选择是否创建上述子目录。
-
-文件命名
-
-推荐格式：
-
-YYYY-MM-DD-topic-version.ext
-
-示例：
-
-2026-07-24-fx-debate-progress-v1.md
-2026-07-24-symbol-resolver-design-v1.pdf
-2026-07-24-database-schema-v1.docx
 
 推荐优先使用 Markdown 作为可审查的主文档；
 Word、PowerPoint 和 PDF 可放入 attachments/ 作为附件。
@@ -60,15 +44,6 @@ API Key、Token、Cookie、密码或私钥；
 
 如发现敏感信息，应在提交前删除；不要依赖后续提交来覆盖。
 
-推荐分支名
-docs/<github-username>-<topic>
-
-示例：
-
-docs/example-user-weekly-progress
-推荐提交信息
-docs(progress): add <topic> report
-当前目录负责人
 
 本 README 仅定义文档入口和协作规则。
 
