@@ -23,7 +23,6 @@ docs/team-progress/example-user/
 ```text
 docs/team-progress/<github-username>/
 ├── README.md
-
 ```
 
 成员可以按实际需要选择是否创建上述子目录。
