@@ -29,6 +29,7 @@ __all__ = [
     "EnvConfig",
     "LLMConfig",
     "DataConfig",
+    "MarketDatabaseConfig",
     "APIConfig",
     "SwarmConfig",
     "AgentTuningConfig",
@@ -176,6 +177,40 @@ class DataConfig(_EnvBase):
     longbridge_app_key: str = Field(alias="LONGBRIDGE_APP_KEY", default="")
     longbridge_app_secret: str = Field(alias="LONGBRIDGE_APP_SECRET", default="")
     longbridge_access_token: str = Field(alias="LONGBRIDGE_ACCESS_TOKEN", default="")
+
+
+# ---------------------------------------------------------------------------
+# Internal market-data PostgreSQL database
+# ---------------------------------------------------------------------------
+
+
+class MarketDatabaseConfig(_EnvBase):
+    """Connection settings for the optional internal market-data database.
+
+    All values are deliberately disabled or blank by default. This keeps the
+    database tools absent for ordinary Vibe-Trading installs and prevents an
+    incomplete local environment from attempting an accidental connection.
+    """
+
+    # 显式开关是第一道保护：即使本机遗留了主机或密码，未启用时也不会注册数据库工具。
+    enabled: EnvBool = Field(alias="MARKET_DB_ENABLED", default=False)
+    # 主机和端口既支持本机 SSH 隧道，也支持未来内网部署；代码不负责建立 SSH 隧道。
+    host: str = Field(alias="MARKET_DB_HOST", default="")
+    port: int = Field(alias="MARKET_DB_PORT", default=5432, ge=1, le=65535)
+    database: str = Field(alias="MARKET_DB_NAME", default="")
+    user: str = Field(alias="MARKET_DB_USER", default="")
+    # 密码只能来自被 .gitignore 排除的本机环境变量或 .env，绝不能写入仓库。
+    password: str = Field(alias="MARKET_DB_PASSWORD", default="")
+    connect_timeout_seconds: int = Field(
+        alias="MARKET_DB_CONNECT_TIMEOUT_SECONDS", default=5, ge=1, le=30
+    )
+    statement_timeout_ms: int = Field(
+        alias="MARKET_DB_STATEMENT_TIMEOUT_MS", default=10000, ge=100, le=60000
+    )
+
+    def is_configured(self) -> bool:
+        """Return whether all required settings for an intentional connection exist."""
+        return bool(self.enabled and self.host and self.database and self.user and self.password)
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +438,7 @@ class EnvConfig(_EnvBase):
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
     data: DataConfig = Field(default_factory=DataConfig)
+    market_database: MarketDatabaseConfig = Field(default_factory=MarketDatabaseConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     agent_tuning: AgentTuningConfig = Field(default_factory=AgentTuningConfig)

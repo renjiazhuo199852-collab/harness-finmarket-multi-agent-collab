@@ -31,6 +31,7 @@ from src.config.env_schema import (
     DataConfig,
     EnvConfig,
     LLMConfig,
+    MarketDatabaseConfig,
     PathConfig,
     SwarmConfig,
     _parse_env_bool,
@@ -43,7 +44,15 @@ from src.config.env_schema import (
 
 # All env-var aliases used by EnvConfig sub-models.
 _ALL_ALIASES: list[str] = []
-for _model in (LLMConfig, DataConfig, APIConfig, SwarmConfig, AgentTuningConfig, PathConfig):
+for _model in (
+    LLMConfig,
+    DataConfig,
+    MarketDatabaseConfig,
+    APIConfig,
+    SwarmConfig,
+    AgentTuningConfig,
+    PathConfig,
+):
     for _info in _model.model_fields.values():
         if _info.alias:
             _ALL_ALIASES.append(_info.alias)
@@ -100,6 +109,16 @@ class TestEnvConfigDefaults:
         assert c.data.longbridge_app_key == ""
         assert c.data.longbridge_app_secret == ""
         assert c.data.longbridge_access_token == ""
+
+    def test_market_database_defaults(self) -> None:
+        c = EnvConfig()
+        assert c.market_database.enabled is False
+        assert c.market_database.host == ""
+        assert c.market_database.port == 5432
+        assert c.market_database.database == ""
+        assert c.market_database.user == ""
+        assert c.market_database.password == ""
+        assert c.market_database.is_configured() is False
 
     def test_api_defaults(self) -> None:
         c = EnvConfig()
@@ -216,6 +235,22 @@ class TestEnvConfigOverride:
         assert data.longbridge_app_key == "app-key"
         assert data.longbridge_app_secret == "app-secret"
         assert data.longbridge_access_token == "access-token"
+
+    def test_market_database_credentials_read_from_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MARKET_DB_ENABLED", "true")
+        monkeypatch.setenv("MARKET_DB_HOST", "127.0.0.1")
+        monkeypatch.setenv("MARKET_DB_PORT", "15433")
+        monkeypatch.setenv("MARKET_DB_NAME", "icbc_shared")
+        monkeypatch.setenv("MARKET_DB_USER", "icbc_collab")
+        monkeypatch.setenv("MARKET_DB_PASSWORD", "test-password")
+
+        database = EnvConfig().market_database
+
+        assert database.is_configured() is True
+        assert database.port == 15433
+        assert database.user == "icbc_collab"
 
     def test_env_override_and_reset(
         self, monkeypatch: pytest.MonkeyPatch
