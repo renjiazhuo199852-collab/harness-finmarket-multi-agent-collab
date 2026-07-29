@@ -1294,6 +1294,133 @@ def get_market_data(
 
 
 # ---------------------------------------------------------------------------
+# 内部 Phase 2 PostgreSQL 市场数据 Tool
+#
+# 这四个包装函数让 MCP 客户端与本地 Agent 使用同一组 Tool 名称。具体的
+# 标准代码解析、跨表关系和参数化 SQL 都在 src.market_data_reader 中，MCP
+# 层只负责把协议参数交给本地 Tool Registry。
+# ---------------------------------------------------------------------------
+
+
+def _execute_internal_market_data_tool(name: str, params: dict[str, Any]) -> str:
+    """执行一个已配置的内部市场数据 Tool，未配置时返回明确提示。"""
+    registry = _get_registry()
+    if registry.get(name) is None:
+        return _json_error(
+            "内部市场数据库未配置；请在本机 agent/.env 设置 MARKET_DB_ENABLED=true "
+            "及完整的 MARKET_DB_* 连接参数，并保持 SSH 隧道运行。",
+            error_type="market_database_unavailable",
+        )
+    return registry.execute(name, params)
+
+
+@mcp.tool
+def get_market_bars(
+    symbol: str,
+    source: str | None = None,
+    frequency: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 250,
+) -> str:
+    """读取内部数据库中一个工具的历史 OHLCV K 线。
+
+    Args:
+        symbol: 标准工具代码，例如 ``EURUSD``。
+        source: 可选供应商，例如 ``LSEG``。
+        frequency: 可选频率，例如 ``daily``。
+        start_date: 可选起始日期，YYYY-MM-DD。
+        end_date: 可选结束日期，YYYY-MM-DD。
+        limit: 最多返回的最近 K 线条数，范围 1-1000。
+    """
+    return _execute_internal_market_data_tool(
+        "get_market_bars",
+        {
+            "symbol": symbol,
+            "source": source,
+            "frequency": frequency,
+            "start_date": start_date,
+            "end_date": end_date,
+            "limit": limit,
+        },
+    )
+
+
+@mcp.tool
+def get_latest_prices(symbol: str, source: str | None = None) -> str:
+    """读取内部数据库中一个工具的当前报价快照。
+
+    Args:
+        symbol: 标准工具代码，例如 ``EURUSD``。
+        source: 可选供应商，例如 ``LSEG``；省略时返回该工具所有供应商报价。
+    """
+    return _execute_internal_market_data_tool(
+        "get_latest_prices", {"symbol": symbol, "source": source}
+    )
+
+
+@mcp.tool
+def get_macro_observations(
+    symbol: str,
+    metric_ids: list[str] | None = None,
+    source: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 100,
+) -> str:
+    """读取与一个工具正式关联的宏观指标发布记录。
+
+    Args:
+        symbol: 标准工具代码，例如 ``EURUSD``。
+        metric_ids: 可选指标代码列表，例如 ``["US_INFLATION_CPI_YOY"]``。
+        source: 可选供应商，例如 ``LSEG``。
+        start_date: 可选起始日期，YYYY-MM-DD。
+        end_date: 可选结束日期，YYYY-MM-DD。
+        limit: 最多返回的最近发布记录条数，范围 1-500。
+    """
+    return _execute_internal_market_data_tool(
+        "get_macro_observations",
+        {
+            "symbol": symbol,
+            "metric_ids": metric_ids,
+            "source": source,
+            "start_date": start_date,
+            "end_date": end_date,
+            "limit": limit,
+        },
+    )
+
+
+@mcp.tool
+def get_news(
+    symbol: str,
+    source: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 50,
+) -> str:
+    """读取与一个工具正式关联的内部新闻文章。
+
+    Args:
+        symbol: 标准工具代码，例如 ``EURUSD``。
+        source: 可选供应商，例如 ``LSEG``。
+        start_date: 可选起始日期，YYYY-MM-DD。
+        end_date: 可选结束日期，YYYY-MM-DD。
+        limit: 最多返回的最近新闻条数，范围 1-200。
+    """
+    return _execute_internal_market_data_tool(
+        "get_news",
+        {
+            "symbol": symbol,
+            "source": source,
+            "start_date": start_date,
+            "end_date": end_date,
+            "limit": limit,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Read-only fundamentals, flow, news & discovery tools
 #
 # Each wrapper delegates to the auto-discovered local registry, exactly like
