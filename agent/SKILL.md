@@ -129,7 +129,7 @@ Comprehensive knowledge base covering:
 
 Use `load_skill(name)` to access full methodology docs with code templates.
 
-## Available MCP Tools (54)
+## Available MCP Tools (58)
 
 | Tool | Description | API Key |
 |------|-------------|---------|
@@ -144,6 +144,10 @@ Use `load_skill(name)` to access full methodology docs with code templates.
 | `analyze_options` | Black-Scholes price + Greeks | None |
 | `pattern_recognition` | Detect chart patterns (H&S, double top, etc.) | None |
 | `get_market_data` | Fetch OHLCV data (auto-detect + ordered fallback across 23 sources) | None* |
+| `get_market_bars` | Read internal PostgreSQL historical OHLCV bars by canonical symbol | MARKET_DB_* |
+| `get_latest_prices` | Read internal PostgreSQL latest quote snapshots by canonical symbol | MARKET_DB_* |
+| `get_macro_observations` | Read internal PostgreSQL macro releases linked to a canonical symbol | MARKET_DB_* |
+| `get_news` | Read internal PostgreSQL news articles linked to a canonical symbol | MARKET_DB_* |
 | `get_fund_flow` | Capital fund-flow (main/retail net inflow) | None* |
 | `get_dragon_tiger` | Dragon-tiger list (龙虎榜) top buyer/seller seats | None* |
 | `get_northbound_flow` | Northbound (Stock Connect) net flow | None* |

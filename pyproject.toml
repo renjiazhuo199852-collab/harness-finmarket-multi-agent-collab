@@ -94,6 +94,10 @@ include = ["src*", "backtest*", "cli*"]
 "src.factors" = ["zoo/**/*.yaml", "zoo/**/*.md", "zoo/**/NOTICE"]
 
 [project.optional-dependencies]
+market-db = [
+    # PostgreSQL 市场数据连接保持为可选依赖，避免未使用内部数据库的用户安装额外驱动。
+    "psycopg[binary]>=3.2,<4",
+]
 ibkr = [
     "ib_async>=2.0",
 ]
