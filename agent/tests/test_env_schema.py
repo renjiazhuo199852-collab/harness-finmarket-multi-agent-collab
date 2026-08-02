@@ -30,6 +30,7 @@ from src.config.env_schema import (
     AgentTuningConfig,
     DataConfig,
     EnvConfig,
+    AIQueryConfig,
     LLMConfig,
     MarketDatabaseConfig,
     PathConfig,
@@ -48,6 +49,7 @@ for _model in (
     LLMConfig,
     DataConfig,
     MarketDatabaseConfig,
+    AIQueryConfig,
     APIConfig,
     SwarmConfig,
     AgentTuningConfig,
@@ -119,6 +121,17 @@ class TestEnvConfigDefaults:
         assert c.market_database.user == ""
         assert c.market_database.password == ""
         assert c.market_database.is_configured() is False
+
+    def test_ai_query_defaults(self) -> None:
+        """AI 查询默认关闭，且默认指向本机独立 AI 数据库。"""
+        c = EnvConfig()
+        assert c.ai_query.enabled is False
+        assert c.ai_query.host == "127.0.0.1"
+        assert c.ai_query.port == 5432
+        assert c.ai_query.database == "icbc_finmarket_ai"
+        assert c.ai_query.embedding_enabled is True
+        assert c.ai_query.embedding_configured is False
+        assert c.ai_query.is_configured() is False
 
     def test_api_defaults(self) -> None:
         c = EnvConfig()
@@ -251,6 +264,25 @@ class TestEnvConfigOverride:
         assert database.is_configured() is True
         assert database.port == 15433
         assert database.user == "icbc_collab"
+
+    def test_ai_query_credentials_read_from_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AI 查询使用独立的数据库配置，不读取旧 MARKET_DB_* 值。"""
+        monkeypatch.setenv("AI_QUERY_ENABLED", "true")
+        monkeypatch.setenv("AI_QUERY_DB_HOST", "127.0.0.1")
+        monkeypatch.setenv("AI_QUERY_DB_PORT", "5432")
+        monkeypatch.setenv("AI_QUERY_DB_NAME", "icbc_finmarket_ai")
+        monkeypatch.setenv("AI_QUERY_DB_USER", "postgres")
+        monkeypatch.setenv("AI_QUERY_DB_PASSWORD", "test-password")
+        monkeypatch.setenv("ZHIPU_API_KEY", "test-key")
+
+        config = EnvConfig().ai_query
+
+        assert config.is_configured() is True
+        assert config.embedding_configured is True
+        assert config.port == 5432
+        assert config.database == "icbc_finmarket_ai"
 
     def test_env_override_and_reset(
         self, monkeypatch: pytest.MonkeyPatch

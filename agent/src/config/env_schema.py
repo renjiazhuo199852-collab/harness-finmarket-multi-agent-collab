@@ -30,6 +30,7 @@ __all__ = [
     "LLMConfig",
     "DataConfig",
     "MarketDatabaseConfig",
+    "AIQueryConfig",
     "APIConfig",
     "SwarmConfig",
     "AgentTuningConfig",
@@ -211,6 +212,58 @@ class MarketDatabaseConfig(_EnvBase):
     def is_configured(self) -> bool:
         """Return whether all required settings for an intentional connection exist."""
         return bool(self.enabled and self.host and self.database and self.user and self.password)
+
+
+# ---------------------------------------------------------------------------
+# AI catalog/query PostgreSQL database
+# ---------------------------------------------------------------------------
+
+
+class AIQueryConfig(_EnvBase):
+    """本地 AI 目录检索和安全查询层的配置。
+
+    这一组配置与 ``MarketDatabaseConfig`` 分开，是为了区分两类数据库：
+    ``MARKET_DB_*`` 继续服务于现有远端 Phase 2 四个 Tool，而 ``AI_QUERY_*``
+    指向包含 ``source`` 和 ``ai`` Schema 的本机 AI 数据库。默认关闭可以防止
+    普通安装在没有明确配置时意外建立数据库连接。
+    """
+
+    # 新查询链路必须显式打开；关闭时后续 Agent Tool 不会注册。
+    enabled: EnvBool = Field(alias="AI_QUERY_ENABLED", default=False)
+    host: str = Field(alias="AI_QUERY_DB_HOST", default="127.0.0.1")
+    port: int = Field(alias="AI_QUERY_DB_PORT", default=5432, ge=1, le=65535)
+    database: str = Field(alias="AI_QUERY_DB_NAME", default="icbc_finmarket_ai")
+    user: str = Field(alias="AI_QUERY_DB_USER", default="")
+    # 密码只能来自本机环境变量或未提交的 agent/.env 文件。
+    password: str = Field(alias="AI_QUERY_DB_PASSWORD", default="")
+    connect_timeout_seconds: int = Field(
+        alias="AI_QUERY_DB_CONNECT_TIMEOUT_SECONDS", default=5, ge=1, le=30
+    )
+    statement_timeout_ms: int = Field(
+        alias="AI_QUERY_DB_STATEMENT_TIMEOUT_MS", default=10000, ge=100, le=60000
+    )
+
+    # 向量检索是可选增强；没有 API Key 时，查询层会降级到关键词和精确匹配。
+    embedding_enabled: EnvBool = Field(alias="AI_QUERY_EMBEDDING_ENABLED", default=True)
+    zhipu_api_key: str = Field(alias="ZHIPU_API_KEY", default="")
+    zhipu_embedding_endpoint: str = Field(
+        alias="ZHIPU_EMBEDDING_ENDPOINT",
+        default="https://open.bigmodel.cn/api/paas/v4/embeddings",
+    )
+    zhipu_embedding_model: str = Field(alias="ZHIPU_EMBEDDING_MODEL", default="embedding-3")
+    max_rows: int = Field(alias="AI_QUERY_MAX_ROWS", default=100, ge=1, le=100)
+    stale_after_seconds: int = Field(
+        alias="AI_QUERY_STALE_AFTER_SECONDS", default=86400, ge=60, le=604800
+    )
+
+    def is_configured(self) -> bool:
+        """返回数据库连接是否被显式启用且凭据完整。"""
+        return bool(self.enabled and self.host and self.database and self.user and self.password)
+
+    @property
+    def embedding_configured(self) -> bool:
+        """返回当前是否具备调用外部 Embedding 服务的最小配置。"""
+        return bool(self.embedding_enabled and self.zhipu_api_key and self.zhipu_embedding_endpoint)
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +492,7 @@ class EnvConfig(_EnvBase):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     market_database: MarketDatabaseConfig = Field(default_factory=MarketDatabaseConfig)
+    ai_query: AIQueryConfig = Field(default_factory=AIQueryConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     agent_tuning: AgentTuningConfig = Field(default_factory=AgentTuningConfig)
