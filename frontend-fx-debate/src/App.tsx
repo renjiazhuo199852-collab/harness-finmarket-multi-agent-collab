@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import {
   Activity, AlertCircle, ArrowUpRight, CheckCircle2, ChevronRight, CircleDot, Database,
@@ -18,7 +18,7 @@ import "@/styles.css";
 
 const VIEW_LABELS: Record<WorkspaceView, string> = {
   chat: "对话",
-  swarm: "智能体团队",
+  swarm: "智能体中心",
   canvas: "协作画布",
   data: "数据概览",
   logs: "流程日志",
@@ -467,7 +467,60 @@ function dependencyText(detail: SwarmPresetDetail, task?: SwarmPresetTask): stri
 }
 
 function SwarmChipList({ items, emptyText }: { items: string[]; emptyText: string }): ReactElement {
-  return items.length ? <div className="swarm-chip-list">{items.map((item) => <span key={item}>{item}</span>)}</div> : <p className="detail-muted">{emptyText}</p>;
+  return items.length ? <div className="swarm-chip-list">{items.map((item) => <span title={item} key={item}>{item}</span>)}</div> : <p className="detail-muted">{emptyText}</p>;
+}
+
+function SwarmChipPreview({ items, limit }: { items: string[]; limit: number }): ReactElement {
+  const preview = capabilityPreview(items, limit);
+  return preview.visible.length ? <div className="swarm-chip-list">{preview.visible.map((item) => <span title={item} key={item}>{item}</span>)}{preview.remaining > 0 ? <span>+{preview.remaining}</span> : null}</div> : <p className="detail-muted">技能 metadata 加载中</p>;
+}
+
+type AgentCatalogEntry = {
+  key: string;
+  preset: SwarmPresetSummary;
+  detail: SwarmPresetDetail;
+  agent: SwarmPresetAgent;
+};
+
+const FX_CATALOG_AGENT_ORDER = ["pair_bull", "pair_bear", "macro_technical", "fx_risk_officer", "debate_judge"];
+
+function buildAgentCatalog(presets: SwarmPresetSummary[], details: Record<string, SwarmPresetDetail>): AgentCatalogEntry[] {
+  return presets.flatMap((preset) => {
+    const detail = details[preset.name];
+    return detail ? detail.agents.map((agent) => ({ key: `${preset.name}::${agent.id}`, preset, detail, agent })) : [];
+  }).sort((left, right) => {
+    const leftCore = isCorePreset(left.preset) ? 0 : 1;
+    const rightCore = isCorePreset(right.preset) ? 0 : 1;
+    if (leftCore !== rightCore) return leftCore - rightCore;
+    if (left.preset.name === "fx_debate_team" && right.preset.name === "fx_debate_team") {
+      return FX_CATALOG_AGENT_ORDER.indexOf(left.agent.id) - FX_CATALOG_AGENT_ORDER.indexOf(right.agent.id);
+    }
+    return `${presetDisplay(left.preset).title} ${left.agent.id}`.localeCompare(`${presetDisplay(right.preset).title} ${right.agent.id}`, "zh-CN");
+  });
+}
+
+function capabilityPreview(items: string[], limit: number): { visible: string[]; remaining: number } {
+  return { visible: items.slice(0, limit), remaining: Math.max(0, items.length - limit) };
+}
+
+function AgentCatalogChips({ items, limit }: { items: string[]; limit: number }): ReactElement {
+  const preview = capabilityPreview(items, limit);
+  return <div className="agent-catalog-chips">{preview.visible.length ? preview.visible.map((item) => <span title={item} key={item}>{item}</span>) : <em>未显式配置</em>}{preview.remaining > 0 ? <span>+{preview.remaining}</span> : null}</div>;
+}
+
+function AgentCatalogCard({ entry, onOpen }: { entry: AgentCatalogEntry; onOpen: () => void }): ReactElement {
+  const display = presetDisplay(entry.preset);
+  const tools = entry.agent.tools || [];
+  const skills = entry.agent.skills || [];
+  const toolRow = <div className="agent-catalog-capability"><span>可调用工具</span><AgentCatalogChips items={tools} limit={4} /></div>;
+  const skillRow = <div className="agent-catalog-capability"><span>专业技能</span><AgentCatalogChips items={skills} limit={3} /></div>;
+  return <article className="agent-catalog-card">
+    <div className="agent-catalog-card-head"><div className="agent-catalog-title"><strong>{agentRoleLabel(entry.preset.name, entry.agent)}</strong><span>{entry.agent.id}</span></div>{display.isCore ? <span className="team-badge team-badge-core">项目核心</span> : null}</div>
+    <div className="agent-catalog-responsibility"><span>主要职责</span><p>{agentResponsibility(entry.preset.name, entry.agent)}</p></div>
+    <div className="agent-catalog-team"><span>所属团队</span><strong>{display.title}</strong></div>
+    {display.isCore ? <>{skillRow}{toolRow}</> : <>{toolRow}{skillRow}</>}
+    <button className="text-button agent-catalog-open" onClick={onOpen}>查看团队 <ChevronRight size={14} /></button>
+  </article>;
 }
 
 function SwarmCatalogView(): ReactElement {
@@ -476,6 +529,8 @@ function SwarmCatalogView(): ReactElement {
   const [selectedName, setSelectedName] = useState(() => new URLSearchParams(window.location.search).get("preset") || "");
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<AgentTeamCategory>("全部");
+  const [agentQuery, setAgentQuery] = useState("");
+  const [agentCategory, setAgentCategory] = useState("全部智能体");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -495,7 +550,7 @@ function SwarmCatalogView(): ReactElement {
       });
       setDetails(next);
       const failed = settled.filter((result) => result.status === "rejected").length;
-      if (failed > 0) setError(`有 ${failed} 个团队详情读取失败，目录仍可浏览。`);
+      if (failed > 0) setError(`部分智能体信息暂时无法加载（有 ${failed} 个团队详情读取失败，目录仍可浏览）。`);
     }).catch((cause: unknown) => {
       if (active) setError(cause instanceof Error ? cause.message : "无法读取智能体团队预设");
     }).finally(() => {
@@ -518,7 +573,7 @@ function SwarmCatalogView(): ReactElement {
     const detail = details[preset.name];
     const display = presetDisplay(preset);
     const haystack = [
-      display.title, display.description, display.category, display.badge,
+      display.title, display.description, display.category, display.badge, ...(display.searchAliases || []),
       preset.name, preset.title, preset.description, variableLabels(preset),
       ...(detail?.agents.map((agent) => `${agent.id} ${agent.role} ${agentRoleLabel(preset.name, agent)} ${agentResponsibility(preset.name, agent)}`) || []),
       ...(detail ? uniqueAgentValues(detail, "tools") : []),
@@ -528,11 +583,30 @@ function SwarmCatalogView(): ReactElement {
   };
   const visible = presets.filter(matchesSearch);
   const coreTeams = visible.filter(isCorePreset);
-  const professionalTeams = visible.filter((preset) => !isCorePreset(preset) && (category === "全部" || presetDisplay(preset).category === category));
+  const professionalTeams = visible
+    .filter((preset) => category === "全部" || presetDisplay(preset).category === category)
+    .sort((left, right) => Number(right.name === "fx_debate_team") - Number(left.name === "fx_debate_team"));
+  const agentCatalog = useMemo(() => buildAgentCatalog(presets, details), [presets, details]);
   const counts = {
-    core: presets.filter(isCorePreset).length,
-    professional: presets.filter((preset) => !isCorePreset(preset)).length,
+    coreTeams: presets.filter(isCorePreset).length,
+    coreAgents: agentCatalog.filter((entry) => isCorePreset(entry.preset)).length,
+    totalTeams: presets.length,
+    totalAgents: agentCatalog.length,
   };
+  const normalizedAgentQuery = agentQuery.trim().toLowerCase();
+  const agentVisible = agentCatalog.filter((entry) => {
+    const display = presetDisplay(entry.preset);
+    const categoryMatches = agentCategory === "全部智能体"
+      || (agentCategory === "项目核心" ? display.isCore === true : display.category === agentCategory);
+    const haystack = [
+      agentRoleLabel(entry.preset.name, entry.agent), entry.agent.role, entry.agent.id,
+      agentResponsibility(entry.preset.name, entry.agent), display.title, display.description,
+      display.category, ...(display.searchAliases || []), entry.preset.name, entry.preset.title,
+      entry.preset.description, ...(entry.agent.tools || []), ...(entry.agent.skills || []),
+    ].filter(Boolean).join(" ").toLowerCase();
+    return categoryMatches && (!normalizedAgentQuery || haystack.includes(normalizedAgentQuery));
+  });
+  const agentCategories = ["全部智能体", "项目核心", ...AGENT_TEAM_CATEGORIES.filter((item) => item !== "全部")];
 
   const renderPresetCard = (preset: SwarmPresetSummary, featured = false) => {
     const detail = details[preset.name];
@@ -541,10 +615,10 @@ function SwarmCatalogView(): ReactElement {
     const skills = detail ? uniqueAgentValues(detail, "skills") : [];
     const stages = detail?.layers.length || 0;
     return <button className={`swarm-card ${featured ? "swarm-card-featured" : ""}`} key={preset.name} onClick={() => openPreset(preset.name)}>
-      <div className="swarm-card-head"><div className="swarm-card-title">{featured ? <span className="team-badge team-badge-core">{display.badge}</span> : null}<h3>{display.title}</h3><code>{preset.name}</code></div><ChevronRight size={17} /></div>
+      <div className="swarm-card-head"><div className="swarm-card-title">{display.isCore ? <span className="team-badge team-badge-core">{display.badge}</span> : null}<h3>{display.title}</h3><code>{preset.name}</code></div><ChevronRight size={17} /></div>
       <p>{display.description}</p>
       <div className="swarm-card-stats"><span>{detail?.agents.length ?? preset.agent_count ?? 0} 个智能体</span><span>{detail?.tasks.length ?? 0} 个任务</span><span>{featured ? stages : tools.length} {featured ? "个协作阶段" : "个工具"}</span><span>{skills.length} 个技能</span></div>
-      <small>输入：{variableLabels(preset)}</small>
+      {featured ? <div className="swarm-card-featured-skills"><span>专业技能</span><SwarmChipPreview items={skills} limit={5} /></div> : null}<small>输入：{variableLabels(preset)}</small>
     </button>;
   };
 
@@ -555,7 +629,7 @@ function SwarmCatalogView(): ReactElement {
     const skills = uniqueAgentValues(selected, "skills");
     const hasWorkflow = selected.layers.length > 1 || selected.tasks.some((task) => task.depends_on.length > 0);
     return <div className="workspace-view swarm-view">
-      <button className="text-button swarm-back" onClick={closeDetail}>返回智能体团队</button>
+      <button className="text-button swarm-back" onClick={closeDetail}>返回智能体中心</button>
       <div className="view-heading"><div><span className="eyebrow">团队详情</span><h2>{display.title}</h2><code className="preset-id-line">{selected.name}</code><p>{display.description}</p></div>{display.isCore ? <div className="context-tags"><span>{display.badge}</span></div> : null}</div>
       <div className="swarm-metrics"><div><span>智能体</span><strong>{selected.agents.length}</strong></div><div><span>任务</span><strong>{selected.tasks.length}</strong></div><div><span>工具</span><strong>{tools.length}</strong></div><div><span>技能</span><strong>{skills.length}</strong></div></div>
       <section className="swarm-section"><div className="section-heading"><h3>协作流程</h3><span>{hasWorkflow ? "依据预设工作流生成" : "未配置工作流依赖"}</span></div>{hasWorkflow ? <div className="swarm-workflow" style={{ gridTemplateColumns: selected.layers.flatMap((_layer, index) => index === selected.layers.length - 1 ? ["minmax(0, 1fr)"] : ["minmax(0, 1fr)", "38px"]).join(" ") }}>{selected.layers.map((layer, index) => <Fragment key={index}><div className="swarm-layer"><small>第 {index + 1} 阶段</small><div className="swarm-layer-body">{layer.map((node) => {
@@ -565,7 +639,7 @@ function SwarmCatalogView(): ReactElement {
       })}</div></div>{index < selected.layers.length - 1 ? <div className="swarm-workflow-connector" aria-hidden="true"><div><i /><ChevronRight size={14} /></div></div> : null}</Fragment>)}</div> : <p className="detail-muted">该团队的任务没有依赖信息，页面不生成推测流程图。</p>}</section>
       <section className="swarm-section"><div className="section-heading"><h3>智能体与职责</h3><span>{selected.agents.length} 个智能体</span></div><div className="swarm-agent-grid">{selected.agents.map((agent) => {
         const task = taskForAgent(selected, agent);
-        return <article className="swarm-agent-card" key={agent.id}><div className="agent-card-top"><span className="agent-icon"><Activity size={16} /></span><div className="agent-card-title"><strong>{agentRoleLabel(selected.name, agent)}</strong><span>{agent.id}</span></div></div><div className="agent-responsibility"><span>主要职责</span><p>{agentResponsibility(selected.name, agent)}</p></div><div className="swarm-agent-meta"><span>负责任务</span><strong><b>{taskLabel(task)}</b>{task ? <code>{task.id}</code> : null}</strong><span>上游依赖</span><strong>{dependencyText(selected, task)}</strong></div><h4>可调用工具</h4><SwarmChipList items={agent.tools || []} emptyText="未显式配置" /><h4>专业技能</h4><SwarmChipList items={agent.skills || []} emptyText="未显式配置" /></article>;
+        return <article className="swarm-agent-card" key={agent.id}><div className="agent-card-top"><span className="agent-icon"><Activity size={16} /></span><div className="agent-card-title"><strong>{agentRoleLabel(selected.name, agent)}</strong><span>{agent.id}</span></div></div><div className="agent-responsibility"><span>主要职责</span><p>{agentResponsibility(selected.name, agent)}</p></div><div className="swarm-agent-meta"><span>负责任务</span><strong><b>{taskLabel(task)}</b>{task ? <code>{task.id}</code> : null}</strong><span>上游依赖</span><strong>{dependencyText(selected, task)}</strong></div>{display.isCore ? <><h4>专业技能</h4><SwarmChipList items={agent.skills || []} emptyText="未显式配置" /><h4>可调用工具</h4><SwarmChipList items={agent.tools || []} emptyText="未显式配置" /></> : <><h4>可调用工具</h4><SwarmChipList items={agent.tools || []} emptyText="未显式配置" /><h4>专业技能</h4><SwarmChipList items={agent.skills || []} emptyText="未显式配置" /></>}</article>;
       })}</div></section>
       <section className="swarm-section"><div className="section-heading"><h3>团队能力汇总</h3><span>{tools.length + skills.length} 项能力</span></div><div className="swarm-capability-summary"><div><h4>团队可用工具</h4><SwarmChipList items={tools} emptyText="未显式配置" /></div><div><h4>团队专业技能</h4><SwarmChipList items={skills} emptyText="未显式配置" /></div></div></section>
       {selected.warnings && selected.warnings.length > 0 ? <section className="swarm-section"><div className="section-heading"><h3>预设检查提示</h3><span>{selected.warnings.length} 条</span></div><SwarmChipList items={selected.warnings} emptyText="无提示" /></section> : null}
@@ -573,12 +647,13 @@ function SwarmCatalogView(): ReactElement {
   }
 
   return <div className="workspace-view swarm-view">
-    <div className="view-heading"><div><span className="eyebrow">智能体团队目录</span><h2>智能体团队</h2><p>面向金融研究场景组织多角色协作，让不同智能体分别完成分析、复核与汇总判断。</p></div><div className="swarm-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索团队、智能体、工具或技能" /></div></div>
-    <div className="swarm-summary"><span>共 {presets.length} 个团队</span><span>项目核心 {counts.core}</span><span>专业团队 {counts.professional}</span></div>
+    <div className="view-heading"><div><span className="eyebrow">AGENT CENTER</span><h2>智能体中心</h2><p>浏览专业智能体团队与角色能力</p></div><div className="swarm-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索团队、智能体、工具或技能" /></div></div>
+    <div className="swarm-summary"><span>{counts.totalTeams} 个专业团队 · {counts.totalAgents} 个专业智能体</span><span>其中 {counts.coreTeams} 个项目核心团队 · {counts.coreAgents} 个项目核心智能体</span></div>
     {error ? <div className="error-banner"><AlertCircle size={16} />{error}<button onClick={() => setError("")} title="关闭"><XCircle size={15} /></button></div> : null}
     {loading ? <EmptyState title="正在读取智能体团队" detail="正在从后端预设元数据加载真实智能体、工具和技能信息。" /> : visible.length === 0 ? <EmptyState title="没有匹配的智能体团队" detail={presets.length === 0 ? "当前后端没有返回任何预设。" : "换一个关键词试试。"} /> : <>
       {coreTeams.length > 0 ? <section className="swarm-list-section"><div className="section-heading"><h3>项目核心团队</h3><span>{coreTeams.length} 个团队</span></div><div className="swarm-featured-grid">{coreTeams.map((preset) => renderPresetCard(preset, true))}</div></section> : null}
       <section className="swarm-list-section"><div className="section-heading"><h3>专业智能体团队</h3><span>{professionalTeams.length} 个团队</span></div><div className="swarm-category-row">{AGENT_TEAM_CATEGORIES.map((item) => <button key={item} className={category === item ? "filter-active" : ""} onClick={() => setCategory(item)}>{item}</button>)}</div>{professionalTeams.length === 0 ? <EmptyState title="没有匹配的智能体团队" detail="当前搜索词与分类组合下没有结果。" /> : <div className="swarm-grid">{professionalTeams.map((preset) => renderPresetCard(preset))}</div>}</section>
+      <section className="swarm-list-section agent-catalog-section"><div className="section-heading"><div><h3>专业智能体</h3><p>浏览各专业团队中的智能体角色、职责及可调用能力</p></div><span>共 {agentVisible.length} 个智能体</span></div><div className="agent-catalog-controls"><div className="swarm-search"><Search size={15} /><input value={agentQuery} onChange={(event) => setAgentQuery(event.target.value)} placeholder="搜索智能体、团队、工具或技能" /></div><div className="swarm-category-row">{agentCategories.map((item) => <button key={item} className={agentCategory === item ? "filter-active" : ""} onClick={() => setAgentCategory(item)}>{item}</button>)}</div></div>{loading ? <EmptyState title="正在加载智能体信息..." detail="正在读取正式团队的真实 preset metadata。" /> : agentVisible.length === 0 ? <EmptyState title="没有匹配的专业智能体" detail={agentCatalog.length === 0 ? "当前没有可展示的智能体 metadata。" : "换一个关键词或分类试试。"} /> : <div className="agent-catalog-grid">{agentVisible.map((entry) => <AgentCatalogCard key={entry.key} entry={entry} onOpen={() => openPreset(entry.preset.name)} />)}</div>}</section>
     </>}
   </div>;
 }

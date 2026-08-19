@@ -50,11 +50,11 @@ const fxPresetDetail = {
   used_variables: ["target"],
   source: "bundled",
   agents: [
-    { id: "pair_bull", role: "Pair Bull", tools: ["get_fx_evidence_manifest"], skills: [] },
-    { id: "pair_bear", role: "Pair Bear", tools: [], skills: ["market-analysis"] },
-    { id: "macro_technical", role: "Macro Technical Analyst", tools: ["get_fx_evidence_manifest"], skills: ["macro-analysis"] },
-    { id: "fx_risk_officer", role: "FX Risk Officer", tools: [], skills: ["risk_review"] },
-    { id: "debate_judge", role: "Debate Judge", tools: [], skills: ["portfolio-construction"] },
+    { id: "pair_bull", role: "Pair Bull", tools: ["get_fx_evidence_manifest"], skills: ["fx-hypothesis-falsification"] },
+    { id: "pair_bear", role: "Pair Bear", tools: [], skills: ["fx-hypothesis-falsification"] },
+    { id: "macro_technical", role: "Macro Technical Analyst", tools: ["get_fx_evidence_manifest"], skills: ["fx-relative-macro-interpretation", "fx-regime-cross-confirmation"] },
+    { id: "fx_risk_officer", role: "FX Risk Officer", tools: [], skills: ["fx-hypothesis-falsification", "fx-relative-macro-interpretation", "fx-regime-cross-confirmation", "risk-analysis"] },
+    { id: "debate_judge", role: "Debate Judge", tools: [], skills: ["fx-relative-macro-interpretation", "fx-regime-cross-confirmation", "risk-analysis", "hedging-strategy"] },
   ],
   tasks: [
     { id: "task-pair-bull", agent_id: "pair_bull", depends_on: [], input_from: {} },
@@ -153,23 +153,43 @@ describe("Swarm catalog UI", () => {
 
     const { container } = render(<App />);
 
-    const card = await screen.findByRole("button", { name: /外汇多智能体辩论团队/ });
-    expect(screen.getByText("智能体团队目录")).toBeTruthy();
-    expect(screen.getByText("项目核心")).toBeTruthy();
+    await screen.findAllByRole("button", { name: /外汇多智能体辩论团队/ });
+    expect(screen.getAllByText("智能体中心").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("项目核心").length).toBeGreaterThan(0);
     expect(screen.queryByText("平台内置")).toBeNull();
     expect(screen.queryByText("测试预设")).toBeNull();
     expect(screen.queryByText("开发与测试")).toBeNull();
     expect(screen.queryByText("外汇辩论流程测试团队")).toBeNull();
-    expect(screen.getByText("共 31 个团队")).toBeTruthy();
-    expect(screen.getByText("专业团队 30")).toBeTruthy();
+    expect(screen.getByText("31 个专业团队 · 7 个专业智能体")).toBeTruthy();
+    expect(screen.getByText("其中 1 个项目核心团队 · 5 个项目核心智能体")).toBeTruthy();
     expect(screen.getByText("专业智能体团队")).toBeTruthy();
-    expect(screen.getByText("商品研究团队")).toBeTruthy();
+    expect(screen.getAllByText("商品研究团队").length).toBeGreaterThan(0);
     expect(screen.getByText("从供给与需求两个方向并行开展商品研究，由周期策略智能体综合形成投资研判。")).toBeTruthy();
-    expect(screen.getByText("5 个智能体")).toBeTruthy();
-    expect(screen.getByText("输入：研究标的 · 时间周期 · 研究目标")).toBeTruthy();
+    expect(screen.getByText("专业智能体")).toBeTruthy();
+    expect(screen.getByText("共 7 个智能体")).toBeTruthy();
+    expect(screen.queryByText("项目核心智能体")).toBeNull();
+    expect(screen.queryByText("其他专业智能体")).toBeNull();
+    expect(container.querySelectorAll(".agent-catalog-grid")).toHaveLength(1);
+    expect(Array.from(container.querySelectorAll(".agent-catalog-card .agent-catalog-title span")).slice(0, 5).map((node) => node.textContent)).toEqual([
+      "pair_bull", "pair_bear", "macro_technical", "fx_risk_officer", "debate_judge",
+    ]);
+    expect(screen.queryByText("智能体团队")).toBeNull();
+    expect(screen.getAllByText("所属团队")).toHaveLength(7);
+    expect(screen.getAllByText("主要职责")).toHaveLength(7);
+    expect(screen.getAllByText("货币对多头分析师")).toHaveLength(1);
+    expect(screen.getAllByText("get_fx_evidence_manifest").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("fx-hypothesis-falsification").length).toBeGreaterThan(0);
+    expect(screen.queryByText("外汇假设证伪")).toBeNull();
+    expect(screen.getAllByText("5 个智能体").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("输入：研究标的 · 时间周期 · 研究目标").length).toBeGreaterThan(0);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain("/swarm/presets/fx_pair_debate_desk_smoke");
+    fireEvent.click(screen.getAllByRole("button", { name: "查看团队" })[0]);
+    await screen.findByText("团队详情");
+    expect(screen.getByText("外汇多智能体辩论团队")).toBeTruthy();
+    fireEvent.click(screen.getByText("返回智能体中心"));
 
-    fireEvent.click(card);
+
+    fireEvent.click((await screen.findAllByRole("button", { name: /外汇多智能体辩论团队/ }))[0]);
 
     await screen.findByText("团队详情");
     expect(screen.getAllByText("货币对多头分析师").length).toBeGreaterThan(0);
@@ -183,7 +203,7 @@ describe("Swarm catalog UI", () => {
     expect(screen.getAllByText("专业技能").length).toBeGreaterThan(0);
     expect(screen.getAllByText("未显式配置").length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByText("返回智能体团队"));
+    fireEvent.click(screen.getByText("返回智能体中心"));
     fireEvent.click(await screen.findByRole("button", { name: /商品研究团队/ }));
     await screen.findByText("团队详情");
     expect(screen.queryByText("平台内置")).toBeNull();
@@ -206,14 +226,67 @@ describe("Swarm catalog UI", () => {
 
     const input = await screen.findByPlaceholderText("搜索团队、智能体、工具或技能");
     fireEvent.change(input, { target: { value: "商品" } });
-    expect(screen.getByText("商品研究团队")).toBeTruthy();
+    expect(screen.getAllByText("商品研究团队").length).toBeGreaterThan(0);
 
     fireEvent.change(input, { target: { value: "fx_debate_team" } });
-    expect(screen.getByText("外汇多智能体辩论团队")).toBeTruthy();
+    expect(screen.getAllByText("外汇多智能体辩论团队").length).toBeGreaterThan(0);
+    fireEvent.change(input, { target: { value: "外汇与宏观" } });
+    expect(screen.getAllByText("外汇多智能体辩论团队").length).toBeGreaterThan(0);
+
 
     fireEvent.change(input, { target: { value: "fx_pair_debate_desk_smoke" } });
     expect(screen.queryByText("外汇辩论流程测试团队")).toBeNull();
     expect(screen.getByText("没有匹配的智能体团队")).toBeTruthy();
+  });
+
+  it("filters the professional agent catalog by aliases, capabilities, and category", async () => {
+    installFetchMock((path) => {
+      if (path === "/sessions?limit=50") return jsonResponse([]);
+      if (path === "/live") return jsonResponse({ status: "healthy" });
+      if (path === "/swarm/presets") return jsonResponse(presetList);
+      if (path === "/swarm/presets/fx_debate_team") return jsonResponse(fxPresetDetail);
+      if (path === "/swarm/presets/commodity_research_team") return jsonResponse(commodityPresetDetail);
+      if (path.startsWith("/swarm/presets/professional_team_")) return jsonResponse({ name: path.slice(path.lastIndexOf("/") + 1), agents: [], tasks: [], layers: [] });
+      return jsonResponse({}, 404);
+    });
+
+    render(<App />);
+
+    const agentInputs = await screen.findAllByPlaceholderText("搜索智能体、团队、工具或技能");
+    const agentInput = agentInputs[agentInputs.length - 1];
+    fireEvent.change(agentInput, { target: { value: "外汇与宏观" } });
+    expect(screen.getByText("共 5 个智能体")).toBeTruthy();
+
+    fireEvent.change(agentInput, { target: { value: "get_fx_evidence_manifest" } });
+    expect(screen.getByText("货币对多头分析师")).toBeTruthy();
+
+    fireEvent.change(agentInput, { target: { value: "fx-hypothesis-falsification" } });
+    expect(screen.getByText("货币对空头分析师")).toBeTruthy();
+
+    fireEvent.change(agentInput, { target: { value: "" } });
+    const categoryButtons = screen.getAllByRole("button", { name: "宏观与外汇" });
+    fireEvent.click(categoryButtons[categoryButtons.length - 1]);
+    expect(screen.getByText("共 5 个智能体")).toBeTruthy();
+  });
+
+  it("keeps readable agent cards when one team detail fails", async () => {
+    installFetchMock((path) => {
+      if (path === "/sessions?limit=50") return jsonResponse([]);
+      if (path === "/live") return jsonResponse({ status: "healthy" });
+      if (path === "/swarm/presets") return jsonResponse(presetList);
+      if (path === "/swarm/presets/fx_debate_team") return jsonResponse(fxPresetDetail);
+      if (path === "/swarm/presets/commodity_research_team") return jsonResponse(commodityPresetDetail);
+      if (path === "/swarm/presets/professional_team_1") return Promise.reject(new TypeError("detail unavailable"));
+      if (path.startsWith("/swarm/presets/professional_team_")) return jsonResponse({ name: path.slice(path.lastIndexOf("/") + 1), agents: [], tasks: [], layers: [] });
+      return jsonResponse({}, 404);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText(/部分智能体信息暂时无法加载/)).toBeTruthy();
+    expect(screen.getByText("专业智能体")).toBeTruthy();
+    expect(screen.getByText("共 7 个智能体")).toBeTruthy();
+    expect(screen.getAllByText("货币对多头分析师")).toHaveLength(1);
   });
 
   it("falls back gracefully for unknown preset localization", () => {
