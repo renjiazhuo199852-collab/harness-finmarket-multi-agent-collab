@@ -1,4 +1,12 @@
-import type { DebateRunSummary, MessageItem, SessionItem, SwarmRunMeta, SwarmTask } from "@/types";
+import type {
+  DebateRunSummary,
+  MessageItem,
+  SessionItem,
+  SwarmPresetDetail,
+  SwarmPresetSummary,
+  SwarmRunMeta,
+  SwarmTask,
+} from "@/types";
 import { normalizeBaseUrl, readApiConfig, type ApiConfig } from "@/lib/api_config";
 
 export const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
@@ -49,6 +57,11 @@ export interface SwarmRunDetail extends SwarmRunMeta {
 export interface ConnectionProbe {
   health: { status: string; service?: string };
   readiness: { ok: boolean; message?: string };
+}
+
+export interface BackendLiveProbe {
+  status?: string;
+  service?: string;
 }
 
 export interface ProviderProbe {
@@ -115,6 +128,7 @@ export interface UpdateDataSourceSettingsPayload {
 }
 
 export const api = {
+  checkBackendLive: () => request<BackendLiveProbe>("/live"),
   createSession: (title = "FX Debate") =>
     request<SessionItem>("/sessions", { method: "POST", body: JSON.stringify({ title }) }),
   listSessions: (limit = 50) => request<SessionItem[]>(`/sessions?limit=${limit}`),
@@ -169,7 +183,8 @@ export const api = {
       final_report: typeof data.final_report === "string" ? data.final_report : null,
     } satisfies SwarmRunDetail;
   },
-  listPresets: () => request<unknown[]>("/swarm/presets"),
+  listPresets: () => request<SwarmPresetSummary[]>("/swarm/presets"),
+  getPreset: (name: string) => request<SwarmPresetDetail>(`/swarm/presets/${encodeURIComponent(name)}`),
   getLlmSettings: () => request<LlmSettings>("/settings/llm"),
   updateLlmSettings: (payload: UpdateLlmSettingsPayload) =>
     request<LlmSettings>("/settings/llm", { method: "PUT", body: JSON.stringify(payload) }),

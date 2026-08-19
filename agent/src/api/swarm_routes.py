@@ -79,12 +79,35 @@ def register_swarm_routes(
 
     # --- Routes ---
 
-    @app.get("/swarm/presets")
+    @app.get("/swarm/presets", dependencies=[Depends(require_auth)])
     async def list_swarm_presets():
         """List Swarm YAML presets."""
         from src.swarm.presets import list_presets
 
         return list_presets()
+
+    @app.get("/swarm/presets/{preset_name}", dependencies=[Depends(require_auth)])
+    async def get_swarm_preset(preset_name: str):
+        """Return read-only metadata for a Swarm YAML preset."""
+        _host_validate_path_param(preset_name, "preset_name")
+        from src.swarm.presets import PRESETS_DIR, USER_PRESETS_DIR, inspect_preset, resolve_preset_path
+
+        try:
+            path = resolve_preset_path(preset_name)
+            if path is None:
+                raise FileNotFoundError(f"Preset {preset_name!r} not found")
+            detail = inspect_preset(preset_name)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        source = "user" if path.parent == USER_PRESETS_DIR else "bundled"
+        return {
+            **detail,
+            "source": source,
+            "file": path.name if path.parent == PRESETS_DIR else None,
+        }
 
     @app.post("/swarm/runs", dependencies=[Depends(require_auth)])
     async def create_swarm_run(payload: dict, http_request: Request):
