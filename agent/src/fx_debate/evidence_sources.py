@@ -12,7 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.fx_debate.analytics import as_utc_datetime
 from src.fx_debate.data_query_agent import (
     AiSearchClient,
+    DataSearchClient,
     FxDataQueryAgent,
+    McpAiSearchClient,
 )
 from src.fx_debate.models import EvidenceContext
 from src.market_data_reader import MarketDataReader
@@ -215,30 +217,46 @@ class ReaderFxEvidenceSource:
 
 
 class AiSearchFxEvidenceSource:
-    """Use the independent AI Search service as the FX evidence provider.
+    """Use the independent AI Search MCP service as the FX evidence provider.
 
-    The provider is accessed only over its versioned HTTP contract. No module
-    from ``external/market-data-tools`` is imported into the Agent process.
+    The production provider is accessed over local MCP stdio. The optional HTTP
+    client remains accepted for compatibility tests and older callers.
     """
 
     def __init__(
         self,
-        client: AiSearchClient | None = None,
+        client: DataSearchClient | None = None,
         *,
         service_url: str | None = None,
         timeout_seconds: float = 30.0,
         max_rows: int = 250,
         trace_callback: Callable[[dict[str, Any]], None] | None = None,
+        mcp_command: str = "",
+        mcp_args: str = "",
+        mcp_server_module: str = "backend.mcp_server",
+        mcp_working_directory: str = "",
+        mcp_timeout_seconds: float = 30.0,
     ) -> None:
         if client is None:
-            if not service_url:
-                raise ValueError("FX_DATA_SERVICE_URL is required for ai_search")
-            client = AiSearchClient(
-                service_url,
-                timeout_seconds=timeout_seconds,
-                max_rows=max_rows,
-                trace_callback=trace_callback,
-            )
+            if service_url:
+                # 兼容旧调用方；生产路径由 _configured_evidence_source
+                # 传入 MCP 配置，不再依赖 HTTP 服务地址。
+                client = AiSearchClient(
+                    service_url,
+                    timeout_seconds=timeout_seconds,
+                    max_rows=max_rows,
+                    trace_callback=trace_callback,
+                )
+            else:
+                client = McpAiSearchClient.from_repository(
+                    command=mcp_command,
+                    args_json=mcp_args,
+                    server_module=mcp_server_module,
+                    working_directory=mcp_working_directory,
+                    timeout_seconds=mcp_timeout_seconds or timeout_seconds,
+                    max_rows=max_rows,
+                    trace_callback=trace_callback,
+                )
         self.client = client
         self.agent = FxDataQueryAgent(client)
 

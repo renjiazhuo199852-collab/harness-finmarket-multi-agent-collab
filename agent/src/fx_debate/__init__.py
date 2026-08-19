@@ -17,9 +17,11 @@ from src.fx_debate.evidence_sources import (
 )
 from src.fx_debate.data_query_agent import (
     AiSearchClient,
+    DataSearchClient,
     DataQueryPlan,
     FxDataQueryAgent,
     FxDataServiceError,
+    McpAiSearchClient,
 )
 from src.fx_debate.models import (
     EvidenceContext,
@@ -58,9 +60,11 @@ __all__ = [
     "ReaderFxEvidenceSource",
     "AiSearchFxEvidenceSource",
     "AiSearchClient",
+    "DataSearchClient",
     "DataQueryPlan",
     "FxDataQueryAgent",
     "FxDataServiceError",
+    "McpAiSearchClient",
     "build_evidence_context",
     "AdaptedFxPairDebateRequest",
     "DeterministicFxSymbolResolver",

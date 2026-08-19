@@ -43,15 +43,15 @@ FX Debate 不会把上游旧版五 Agent YAML 复制进来。
 
 AI Search 是数据端同事交付的独立服务目录：
 `external/market-data-tools/`。FX Debate Agent 不导入其中的 Python 模块，也不直接
-拼接 SQL；两边通过 HTTP JSON 协议连接。这样数据端可以独立替换查询解析、Embedding、
-模糊匹配或数据库适配器，而不改变五个 Debate Agent。
+拼接 SQL；本地运行时两边通过 MCP stdio 连接。这样数据端可以独立替换查询解析、
+Embedding、模糊匹配或数据库适配器，而不改变五个 Debate Agent。
 
 ```text
 FX Debate / 顶层 Agent
         │
-        │ HTTP: 自然语言 query + 过滤条件
+        │ MCP stdio: 自然语言 query + 过滤条件
         ▼
-external/market-data-tools FastAPI :8011
+external/market-data-tools MCP Server
         │
         ├─ query parser / dataset candidate selector
         ├─ unified_search（优先入口）
@@ -76,7 +76,7 @@ external/market-data-tools FastAPI :8011
   `news_search_documents` 三类检索文档表。
 - 检索文档包含与当前 Embedding 模型匹配的 `halfvec(2048)` 向量，并使用 HNSW 索引；
   关键词/相似度检索还可使用 `pg_trgm` 和 pgvector 扩展。
-- 数据库由 AI Search 服务独立管理；FX Debate 运行时只访问服务的 HTTP 接口，不需要在
+- 数据库由 AI Search 服务独立管理；FX Debate 运行时只通过 MCP 访问服务，不需要在
   Agent 项目中恢复快照、建表或重建向量。
 
 自然语言查询不会直接决定物理表。服务端按以下顺序收敛查询：
@@ -114,7 +114,21 @@ FX Debate 对数据服务的默认入口是 `unified_search`。它通过数据�
 `news_articles_search` 仍然保留，主要用于数据端独立测试、顶层显式领域查询和兼容旧调用方。
 除非用户明确指定领域或兼容接口，新增代码应优先使用 `unified_search`。
 
-### HTTP 接口和返回协议
+主 Agent 的 MCP stdio 面只注册 `unified_search`。四个独立工具不是已注册的 MCP 工具，
+也不会被删除；它们继续作为 AI Search 的 HTTP 测试和兼容接口存在。
+
+### HTTP 接口和 MCP 返回协议
+
+主 Agent 的正式接入方式是本地 MCP stdio，MCP 服务只暴露：
+
+```text
+unified_search
+```
+
+MCP 输入和输出使用与统一 HTTP 接口相同的业务结构。主 Agent 启动查询时会自动启动
+`external/market-data-tools` 的 MCP 子进程，不需要另外启动 AI Search HTTP 服务。
+
+AI Search 仍保留以下 HTTP 接口，供前端、单路线测试和旧调用方使用：
 
 独立服务提供以下正式业务接口：
 
@@ -152,9 +166,7 @@ GET  /health
 }
 ```
 
-FX Debate 使用版本化的 `/v1/evidence/{tool_name}`，在 `data` 外保留白名单元数据，
-例如 `observation_time`、`provider`、`identifier`、`frequency`、`row_count` 和
-`schema_version=fx-evidence.v1`。该接口不会破坏原有 `/tools/*` 返回格式。
+`/v1/evidence/{tool_name}` 仍然保留给旧 HTTP 调用方，但 FX Debate 默认不再访问该接口。
 
 ## 数据查询 Agent 与五 Agent Debate 的关系
 
@@ -234,37 +246,41 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 
 ```env
 FX_DEBATE_DATA_SOURCE=ai_search
-FX_DATA_SERVICE_URL=http://127.0.0.1:8011
 FX_DATA_SERVICE_ENABLED=1
-FX_DATA_SERVICE_TIMEOUT_SECONDS=30
 FX_DATA_SERVICE_MAX_ROWS=250
+FX_DATA_MCP_COMMAND=
+FX_DATA_MCP_ARGS=
+FX_DATA_MCP_SERVER_MODULE=backend.mcp_server
+FX_DATA_MCP_WORKING_DIRECTORY=
+FX_DATA_MCP_TIMEOUT_SECONDS=30
 ```
 
-这里的配置只告诉 Agent 如何访问独立 AI Search 服务。数据服务自己的 Embedding、候选模型
-和存储配置只由数据服务维护，不能混入 `agent/.env`。
+这里的配置告诉 Agent 如何通过本地 MCP stdio 启动独立 AI Search 服务。数据服务自己的
+Embedding、候选模型和存储配置只由数据服务维护，不能混入 `agent/.env`。
 
 在 `ai_search` 模式下，`FX_DATA_SERVICE_ENABLED=1` 还会向顶层 Agent 注册
 `query_fx_data`。如果只想让 FX Debate 使用服务、不开放顶层数据查询，可以保留
 `FX_DEBATE_DATA_SOURCE=ai_search`，但将 `FX_DATA_SERVICE_ENABLED=0`；Debate 内部仍会访问
-`/v1/evidence/{tool_name}`。修改 `agent/.env` 后必须重启主 API 服务。
+MCP `unified_search`。修改 `agent/.env` 后必须重启主 API 服务。
 
-独立 AI Search 服务的内部配置由数据端维护，Agent 只接收 HTTP 结果，不需要知道其
+独立 AI Search 服务的内部配置由数据端维护，Agent 只接收 MCP 结果，不需要知道其
 Embedding、候选模型或存储凭据。部署说明见
 [`external/market-data-tools/README.integration.md`](external/market-data-tools/README.integration.md)。
 
 ## 启动方式
 
-### 1. 启动 AI Search 服务
+### 1. 准备 AI Search MCP 服务
 
-AI Search 是 FX Debate 唯一的数据入口。先按数据端说明准备服务端私有配置，然后在仓库根目录执行：
+AI Search 是 FX Debate 唯一的数据入口。先按数据端说明准备服务端私有配置和依赖；
+主 Agent 启动时会自动执行：
 
 ```bash
 cd external/market-data-tools
 python -m pip install -r requirements.txt
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8011
+python -m backend.mcp_server
 ```
 
-确认 <http://127.0.0.1:8011/health> 可访问后，再启动主 API。
+上面的命令用于单独检查 MCP stdio 协议；正常运行不需要手动保持该进程窗口。
 
 ### 2. 启动主 API
 
@@ -355,7 +371,8 @@ curl -s -X POST http://127.0.0.1:8011/tools/unified_search \
 
 **对话返回 HTTP 500**
 
-先确认主 API 是 `8899` 且 AI Search 服务是 `8011`，再在“设置”页测试后端连接。若后端可访问但未就绪，检查 LLM provider、model、API key 和 AI Search 服务状态；修改 dotenv 后重启 API。
+先确认主 API 是 `8899`，再在“设置”页测试后端连接。若数据未就绪，检查 AI Search
+MCP 依赖、数据库隧道、模型配置和 MCP 启动日志；修改 dotenv 后重启 API。
 
 **模型供应商测试失败**
 
@@ -363,7 +380,8 @@ curl -s -X POST http://127.0.0.1:8011/tools/unified_search \
 
 **FX 数据不可用**
 
-确认 `FX_DEBATE_DATA_SOURCE=ai_search`、`FX_DATA_SERVICE_URL` 和 AI Search 的 `/health` 状态。服务不可用时系统会明确返回数据不可用，不会将 FX 请求静默降级为股票分析或其他数据源。
+确认 `FX_DEBATE_DATA_SOURCE=ai_search`、MCP 工作目录和 AI Search 的数据库配置。服务不可用时
+系统会明确返回数据不可用，不会将 FX 请求静默降级为股票分析或其他数据源。
 
 **画布显示等待依赖或阻塞**
 

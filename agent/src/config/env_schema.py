@@ -260,6 +260,19 @@ class FxDebateDataConfig(_EnvBase):
     data_service_max_rows: int = Field(
         alias="FX_DATA_SERVICE_MAX_ROWS", default=250, ge=1, le=1000
     )
+    # AI Search 的正式接入使用本地 MCP stdio。命令和工作目录允许部署环境
+    # 覆盖，默认值由 data_query_agent 根据当前仓库位置安全推导。
+    mcp_command: str = Field(alias="FX_DATA_MCP_COMMAND", default="")
+    mcp_args: str = Field(alias="FX_DATA_MCP_ARGS", default="")
+    mcp_server_module: str = Field(
+        alias="FX_DATA_MCP_SERVER_MODULE", default="backend.mcp_server"
+    )
+    mcp_working_directory: str = Field(
+        alias="FX_DATA_MCP_WORKING_DIRECTORY", default=""
+    )
+    mcp_timeout_seconds: float = Field(
+        alias="FX_DATA_MCP_TIMEOUT_SECONDS", default=30.0, ge=1.0, le=300.0
+    )
 
 
 # ---------------------------------------------------------------------------

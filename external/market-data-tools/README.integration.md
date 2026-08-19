@@ -1,8 +1,16 @@
 # FX Debate 接入说明
 
 本目录是数据端同事交付的独立 AI Search 服务副本。当前 Agent 项目不导入其中的
-Python 模块，运行时通过 HTTP 访问它；这样数据端可以独立升级查询解析、目录检索和
-数据库适配，而 FX Debate 只依赖稳定的接口协议。
+Python 模块，运行时通过本地 MCP stdio 访问它；这样数据端可以独立升级查询解析、
+目录检索和数据库适配，而 FX Debate 只依赖稳定的接口协议。
+
+主 Agent 的 MCP 面只暴露一个工具：
+
+```text
+unified_search
+```
+
+四个独立业务工具仍保留为 HTTP 测试和兼容接口，不是主 Agent 的 MCP 工具。
 
 ## 服务接口
 
@@ -32,17 +40,20 @@ POST /v1/evidence/{tool_name}
 ```bash
 cd external/market-data-tools
 python -m pip install -r requirements.txt
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8011
+python -m backend.mcp_server
 ```
 
 FX Debate 侧配置：
 
 ```text
 FX_DEBATE_DATA_SOURCE=ai_search
-FX_DATA_SERVICE_URL=http://127.0.0.1:8011
-FX_DATA_SERVICE_TIMEOUT_SECONDS=30
 FX_DATA_SERVICE_MAX_ROWS=250
 FX_DATA_SERVICE_ENABLED=1
+FX_DATA_MCP_COMMAND=
+FX_DATA_MCP_ARGS=
+FX_DATA_MCP_SERVER_MODULE=backend.mcp_server
+FX_DATA_MCP_WORKING_DIRECTORY=
+FX_DATA_MCP_TIMEOUT_SECONDS=30
 ```
 
 `FX_DATA_SERVICE_ENABLED=1` 会向顶层 Agent 注册 `query_fx_data`，允许用户直接问“查询
@@ -50,7 +61,10 @@ EURUSD 最近一个月的日线行情”等数据问题。Debate 运行时则由
 四类受控自然语言查询，并优先全部发送到 `unified_search`；领域语义（价格、日线、宏观、
 新闻）通过查询文本表达，由数据端统一完成意图识别、数据集路由和结果结构化。返回结果会
 冻结成现有 Evidence Bundle 后再交给五个 Debate Agent。顶层查询仍支持显式领域工具名，
-用于兼容已有调用方。
+用于兼容已有调用方，但底层统一通过 MCP 的 `unified_search` 完成。
+
+正常启动主 Agent 时不需要单独启动 HTTP 服务；AI Search MCP 子进程由主 Agent 按需启动。
+HTTP 服务仍可按本 README 的接口说明单独启动，用于前端和兼容测试。
 
 当前服务的 `market_bars` 适配器主要提供日线原始数据，因此缺少 4H 时系统会标记为证据
 不足，不会用其他行情源静默补齐。

@@ -1,21 +1,31 @@
-"""Service-backed FX data query agent.
+"""MCP-backed FX data query agent.
 
-The data provider remains an independent HTTP service. This module owns only
-the integration contract: natural-language query planning, bounded requests,
-structured errors, and a small callback seam for Session/SSE observability.
+The data provider remains an independent process. The production path uses a
+local MCP stdio subprocess; the old HTTP client remains available only for
+backward-compatible callers and tests. This module owns the integration
+contract: natural-language query planning, bounded requests, structured
+errors, and a small callback seam for Session/SSE observability.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Mapping
+from pathlib import Path
+from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import quote
 
+from fastmcp.client import Client
+from fastmcp.client.transports.stdio import StdioTransport
+
+from src.tools.mcp import _run_sync
 from src.fx_debate.models import EvidenceContext
 
 TraceCallback = Callable[[dict[str, Any]], None]
@@ -46,6 +56,23 @@ class DataQueryPlan:
     start_date: str | None = None
     end_date: str | None = None
     max_rows: int = 250
+
+
+class DataSearchClient(Protocol):
+    """统一描述 HTTP 兼容客户端和 MCP 客户端的最小调用接口。"""
+
+    def search(
+        self,
+        tool: str,
+        query: str,
+        *,
+        provider: str | None = None,
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
+        max_rows: int | None = None,
+    ) -> dict[str, Any]:
+        """执行一次受控自然语言数据查询。"""
+        ...
 
 
 class AiSearchClient:
@@ -181,6 +208,171 @@ class AiSearchClient:
             self._trace_callback({"type": event_type, **payload})
 
 
+class McpAiSearchClient:
+    """通过本地 MCP stdio 子进程调用 AI Search 的统一工具。
+
+    每次查询创建一个短生命周期 MCP 会话，避免数据库连接、模型请求或
+    子进程状态跨请求泄漏。AI Search 的环境变量会从其项目目录加载，主
+    Agent 只传递业务查询参数，不传递数据库密码或模型密钥。
+    """
+
+    def __init__(
+        self,
+        command: str,
+        args: list[str],
+        *,
+        working_directory: str,
+        timeout_seconds: float = 30.0,
+        max_rows: int = 250,
+        env: Mapping[str, str] | None = None,
+        trace_callback: TraceCallback | None = None,
+    ) -> None:
+        self.command = command
+        self.args = list(args)
+        self.working_directory = working_directory
+        self.timeout_seconds = timeout_seconds
+        self.max_rows = max_rows
+        self.env = dict(env or {})
+        self._trace_callback = trace_callback
+
+    @classmethod
+    def from_repository(
+        cls,
+        *,
+        command: str = "",
+        args_json: str = "",
+        server_module: str = "backend.mcp_server",
+        working_directory: str = "",
+        timeout_seconds: float = 30.0,
+        max_rows: int = 250,
+        trace_callback: TraceCallback | None = None,
+    ) -> "McpAiSearchClient":
+        """根据当前仓库位置创建默认 AI Search MCP 客户端。"""
+
+        repository_root = Path(__file__).resolve().parents[3]
+        default_directory = repository_root / "external" / "market-data-tools"
+        directory = Path(working_directory).expanduser() if working_directory else default_directory
+        return cls(
+            command=command or sys.executable,
+            args=_parse_mcp_args(args_json, server_module),
+            working_directory=str(directory),
+            timeout_seconds=timeout_seconds,
+            max_rows=max_rows,
+            trace_callback=trace_callback,
+        )
+
+    @property
+    def is_configured(self) -> bool:
+        """返回 MCP 命令和工作目录是否可启动。"""
+
+        return bool(self.command and Path(self.working_directory).is_dir())
+
+    def search(
+        self,
+        tool: str,
+        query: str,
+        *,
+        provider: str | None = None,
+        start_date: date | str | None = None,
+        end_date: date | str | None = None,
+        max_rows: int | None = None,
+    ) -> dict[str, Any]:
+        """调用 MCP 的唯一工具 unified_search。"""
+
+        if tool != "unified_search":
+            raise FxDataServiceError(
+                f"MCP AI Search 只支持 unified_search，收到：{tool}",
+                code="INVALID_DATA_TOOL",
+            )
+        clean_query = str(query or "").strip()
+        if not clean_query:
+            raise FxDataServiceError("数据查询问题不能为空", code="INVALID_DATA_QUERY")
+        row_limit = max_rows if max_rows is not None else self.max_rows
+        if not 1 <= row_limit <= 1000:
+            raise FxDataServiceError("max_rows 必须在 1 到 1000 之间", code="INVALID_DATA_QUERY")
+        payload: dict[str, Any] = {"query": clean_query, "max_rows": row_limit}
+        if provider:
+            payload["provider"] = provider
+        if start_date is not None:
+            payload["start_date"] = _iso_date(start_date)
+        if end_date is not None:
+            payload["end_date"] = _iso_date(end_date)
+
+        started = time.perf_counter()
+        self._trace(
+            "data_service.query_started",
+            {"transport": "mcp_stdio", "tool": tool, "input": payload},
+        )
+        try:
+            result = _run_sync(lambda: self._call_mcp(payload))
+            if not isinstance(result, dict):
+                raise FxDataServiceError(
+                    "MCP 数据服务返回不是 JSON 对象", code="INVALID_DATA_RESPONSE"
+                )
+            if str(result.get("status") or "") != "success":
+                error = result.get("error")
+                error_message = error.get("message") if isinstance(error, dict) else error
+                raise FxDataServiceError(
+                    str(result.get("message") or error_message or "数据服务拒绝了查询"),
+                    code=str(result.get("code") or (error.get("code") if isinstance(error, dict) else "DATA_QUERY_REJECTED")),
+                )
+            self._trace(
+                "data_service.query_completed",
+                {
+                    "transport": "mcp_stdio",
+                    "tool": tool,
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                    "output": _summary(result),
+                },
+            )
+            return result
+        except FxDataServiceError as exc:
+            self._trace(
+                "data_service.query_failed",
+                {"transport": "mcp_stdio", "tool": tool, "code": exc.code, "error": str(exc)},
+            )
+            raise
+        except (TimeoutError, OSError, RuntimeError, ValueError, TypeError) as exc:
+            wrapped = FxDataServiceError(
+                f"MCP 数据服务连接失败：{exc}", code="FX_DATA_SERVICE_UNAVAILABLE"
+            )
+            self._trace(
+                "data_service.query_failed",
+                {"transport": "mcp_stdio", "tool": tool, "code": wrapped.code, "error": str(wrapped)},
+            )
+            raise wrapped from exc
+
+    async def _call_mcp(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """启动 stdio 服务、调用工具并提取结构化返回值。"""
+
+        child_env = os.environ.copy()
+        child_env.update(self.env)
+        transport = StdioTransport(
+            command=self.command,
+            args=self.args,
+            env=child_env,
+            cwd=self.working_directory,
+            keep_alive=False,
+        )
+        async with Client(
+            transport,
+            name="fx-debate-ai-search",
+            timeout=self.timeout_seconds,
+            init_timeout=max(self.timeout_seconds, 30.0),
+        ) as client:
+            result = await client.call_tool(
+                "unified_search",
+                arguments=payload,
+                timeout=self.timeout_seconds,
+                raise_on_error=False,
+            )
+        return _extract_mcp_payload(result)
+
+    def _trace(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self._trace_callback is not None:
+            self._trace_callback({"type": event_type, **payload})
+
+
 class FxDataQueryAgent:
     """Plan and execute data queries for direct requests and Debate runs.
 
@@ -189,7 +381,7 @@ class FxDataQueryAgent:
     tools, while the top-level Agent can call ``query_fx_data`` directly.
     """
 
-    def __init__(self, client: AiSearchClient) -> None:
+    def __init__(self, client: DataSearchClient) -> None:
         self.client = client
 
     def query(
@@ -285,15 +477,15 @@ def _tool_for_domain(domain: str) -> str:
     aliases = {
         "unified": "unified_search",
         "all": "unified_search",
-        "price": "latest_prices_search",
-        "prices": "latest_prices_search",
-        "latest_prices": "latest_prices_search",
-        "bars": "market_bars_search",
-        "market_bars": "market_bars_search",
-        "macro": "macro_observations_search",
-        "macro_observations": "macro_observations_search",
-        "news": "news_articles_search",
-        "news_articles": "news_articles_search",
+        "price": "unified_search",
+        "prices": "unified_search",
+        "latest_prices": "unified_search",
+        "bars": "unified_search",
+        "market_bars": "unified_search",
+        "macro": "unified_search",
+        "macro_observations": "unified_search",
+        "news": "unified_search",
+        "news_articles": "unified_search",
     }
     try:
         return aliases[normalized]
@@ -321,9 +513,63 @@ def _summary(result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _parse_mcp_args(raw_args: str, server_module: str) -> list[str]:
+    """解析 MCP 参数配置；默认启动 backend.mcp_server 模块。"""
+
+    if not raw_args.strip():
+        return ["-m", server_module]
+    try:
+        parsed = json.loads(raw_args)
+    except json.JSONDecodeError:
+        parsed = shlex.split(raw_args, posix=False)
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError("FX_DATA_MCP_ARGS 必须是 JSON 字符串数组")
+    return parsed
+
+
+def _extract_mcp_payload(result: Any) -> dict[str, Any]:
+    """兼容 FastMCP 不同版本的 CallToolResult 结构。"""
+
+    if getattr(result, "is_error", False):
+        raise FxDataServiceError(
+            _mcp_content_text(result) or "MCP 工具调用失败",
+            code="FX_DATA_SERVICE_UNAVAILABLE",
+        )
+    for candidate in (
+        getattr(result, "data", None),
+        getattr(result, "structured_content", None),
+    ):
+        if isinstance(candidate, dict):
+            if isinstance(candidate.get("result"), dict):
+                return candidate["result"]
+            if "status" in candidate:
+                return candidate
+    text = _mcp_content_text(result)
+    if text:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    raise FxDataServiceError(
+        "MCP 工具返回中没有结构化查询结果", code="INVALID_DATA_RESPONSE"
+    )
+
+
+def _mcp_content_text(result: Any) -> str:
+    """提取 MCP 文本内容，便于保留服务端错误信息。"""
+
+    texts: list[str] = []
+    for block in getattr(result, "content", []) or []:
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            texts.append(text)
+    return "\n".join(texts).strip()
+
+
 __all__ = [
     "AiSearchClient",
+    "DataSearchClient",
     "DataQueryPlan",
     "FxDataQueryAgent",
     "FxDataServiceError",
+    "McpAiSearchClient",
 ]

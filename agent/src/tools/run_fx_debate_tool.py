@@ -298,10 +298,19 @@ class RunFxDebateTool(BaseTool):
                 and Path(config.fx_debate.excel_path).expanduser().is_file()
             )
         if config.fx_debate.data_source == "ai_search":
-            return bool(
-                config.fx_debate.data_service_url
-                and config.fx_debate.data_service_url.startswith(("http://", "https://"))
-            )
+            from src.fx_debate.data_query_agent import McpAiSearchClient
+
+            try:
+                return McpAiSearchClient.from_repository(
+                    command=config.fx_debate.mcp_command,
+                    args_json=config.fx_debate.mcp_args,
+                    server_module=config.fx_debate.mcp_server_module,
+                    working_directory=config.fx_debate.mcp_working_directory,
+                    timeout_seconds=config.fx_debate.mcp_timeout_seconds,
+                    max_rows=config.fx_debate.data_service_max_rows,
+                ).is_configured
+            except (TypeError, ValueError, OSError):
+                return False
         return MarketDataReader().is_configured
 
     def execute(self, **kwargs: Any) -> str:
@@ -579,8 +588,11 @@ def _configured_evidence_source(
         return ExcelFxEvidenceSource(config.excel_path)
     if config.data_source == "ai_search":
         return AiSearchFxEvidenceSource(
-            service_url=config.data_service_url,
-            timeout_seconds=config.data_service_timeout_seconds,
+            mcp_command=config.mcp_command,
+            mcp_args=config.mcp_args,
+            mcp_server_module=config.mcp_server_module,
+            mcp_working_directory=config.mcp_working_directory,
+            mcp_timeout_seconds=config.mcp_timeout_seconds,
             max_rows=config.data_service_max_rows,
             trace_callback=trace_callback,
         )

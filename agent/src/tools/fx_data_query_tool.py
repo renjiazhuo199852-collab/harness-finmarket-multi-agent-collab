@@ -13,9 +13,9 @@ from typing import Any, Callable
 from src.agent.tools import BaseTool
 from src.config.accessor import get_env_config
 from src.fx_debate.data_query_agent import (
-    AiSearchClient,
     FxDataQueryAgent,
     FxDataServiceError,
+    McpAiSearchClient,
 )
 
 
@@ -64,9 +64,12 @@ class QueryFxDataTool(BaseTool):
                 event_callback(str(event.get("type") or "data_service.event"), event)
 
         self._agent = FxDataQueryAgent(
-            AiSearchClient(
-                config.data_service_url,
-                timeout_seconds=config.data_service_timeout_seconds,
+            McpAiSearchClient.from_repository(
+                command=config.mcp_command,
+                args_json=config.mcp_args,
+                server_module=config.mcp_server_module,
+                working_directory=config.mcp_working_directory,
+                timeout_seconds=config.mcp_timeout_seconds,
                 max_rows=config.data_service_max_rows,
                 trace_callback=trace_callback,
             )
@@ -75,10 +78,19 @@ class QueryFxDataTool(BaseTool):
     @classmethod
     def check_available(cls) -> bool:
         config = get_env_config().fx_debate
-        return bool(
-            (config.data_service_enabled or config.data_source == "ai_search")
-            and config.data_service_url.startswith(("http://", "https://"))
-        )
+        if not (config.data_service_enabled or config.data_source == "ai_search"):
+            return False
+        try:
+            return McpAiSearchClient.from_repository(
+                command=config.mcp_command,
+                args_json=config.mcp_args,
+                server_module=config.mcp_server_module,
+                working_directory=config.mcp_working_directory,
+                timeout_seconds=config.mcp_timeout_seconds,
+                max_rows=config.data_service_max_rows,
+            ).is_configured
+        except (TypeError, ValueError, OSError):
+            return False
 
     def execute(self, **kwargs: Any) -> str:
         try:

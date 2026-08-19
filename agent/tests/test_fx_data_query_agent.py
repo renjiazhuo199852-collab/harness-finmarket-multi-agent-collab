@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +14,7 @@ from src.fx_debate.data_query_agent import (
     AiSearchClient,
     FxDataQueryAgent,
     FxDataServiceError,
+    McpAiSearchClient,
 )
 from src.fx_debate.evidence_factory import FxEvidenceFactory
 from src.fx_debate.evidence_sources import AiSearchFxEvidenceSource
@@ -127,6 +130,50 @@ def test_direct_query_defaults_to_unified_search() -> None:
 
     assert seen == ["unified_search"]
     assert result["status"] == "success"
+
+
+def test_mcp_client_uses_stdio_and_only_unified_search() -> None:
+    """真实启动 stdio 子进程，验证 domain 别名不会切换到旧工具。"""
+
+    fixture = Path(__file__).parent / "fixtures" / "fake_ai_search_mcp_server.py"
+    client = McpAiSearchClient(
+        sys.executable,
+        [str(fixture)],
+        working_directory=str(fixture.parents[2]),
+        timeout_seconds=15,
+        max_rows=25,
+    )
+
+    result = FxDataQueryAgent(client).query(
+        "查询 EURUSD 的相关新闻",
+        domain="news",
+        start_date="2026-08-01",
+        end_date="2026-08-18",
+        max_rows=7,
+    )
+
+    assert result["status"] == "success"
+    assert result["data"][0]["query"] == "查询 EURUSD 的相关新闻"
+    assert result["data"][0]["start_date"] == "2026-08-01"
+    assert result["data"][0]["max_rows"] == 7
+
+
+def test_mcp_client_reuses_unified_search_for_four_debate_queries() -> None:
+    """四个证据计划都通过同一个 MCP 工具执行。"""
+
+    fixture = Path(__file__).parent / "fixtures" / "fake_ai_search_mcp_server.py"
+    client = McpAiSearchClient(
+        sys.executable,
+        [str(fixture)],
+        working_directory=str(fixture.parents[2]),
+        timeout_seconds=15,
+    )
+
+    responses = FxDataQueryAgent(client).retrieve_for_debate(_context())
+
+    assert set(responses) == {"prices", "bars", "macro", "news"}
+    assert all(response["status"] == "success" for response in responses.values())
+    assert all(response["data"][0]["query"].startswith("查询") for response in responses.values())
 
 
 def test_evidence_source_maps_provider_metadata_into_raw_snapshot() -> None:

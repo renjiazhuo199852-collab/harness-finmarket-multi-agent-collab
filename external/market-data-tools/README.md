@@ -5,8 +5,11 @@
 - 查询解析、数据集目录发现、金融工具确认、字段目录解析和四张业务表适配器；
 - Embedding 语义检索和聊天模型候选筛选；
 - 一个统一查询工具和四个独立业务工具；
-- Python 函数接口、HTTP 接口和 Agent 函数工具定义；
+- Python 函数接口、MCP stdio 接口、HTTP 接口和 Agent 函数工具定义；
 - 数据库完整快照、前端测试工作台和接口协议测试。
+
+主 Agent 的正式接入方式是本地 MCP stdio，MCP 只暴露 `unified_search`。四个独立业务工具
+仍保留为 HTTP 测试和兼容接口，不是主 Agent 的 MCP 工具。
 
 运行时不依赖上级目录的 `ICBC-trading-ai_search`。原项目仍作为开发和历史验证项目保留；
 本目录是可以交给其他 Agent 项目使用的完整版本。
@@ -46,6 +49,24 @@
 
 新闻工具不限制最终新闻候选条数。`max_rows` 不是新闻工具的输入参数。
 Agent 不需要也不能传入 `route`、物理表名、字段名、SQL、Embedding 开关或候选模型开关。
+
+## MCP stdio 接入
+
+主 Agent 通过本地 MCP stdio 启动本项目的 MCP 子进程，正式工具面只有：
+
+```text
+unified_search
+```
+
+手动检查 MCP 服务：
+
+```powershell
+cd D:\python\projects\ICBC-trading\harness-finmarket-multi-agent-collab\external\market-data-tools
+python -m backend.mcp_server
+```
+
+正常使用时不需要单独保持这个进程；主 Agent 会按需启动并关闭它。MCP 服务加载本项目
+`.env` 中的数据库、Embedding 和聊天模型配置，调用参数中不包含任何密钥。
 
 ## 二、统一查询流程
 
@@ -257,9 +278,22 @@ http://127.0.0.1:8011/health
 健康检查只返回数据库和模型是否配置，不返回任何密码或 API Key。数据库检查成功时，
 表示本机后端已经通过 SSH 隧道连接到服务器的 `icbc_shared`。
 
-## 七、HTTP 调用
+## 七、MCP stdio 调用
 
-五个正式接口：
+主 Agent 的正式接入方式是 MCP stdio，服务只暴露 `unified_search`。主 Agent 启动查询时
+会自动执行本项目的 MCP 子进程，不需要单独启动 HTTP 服务：
+
+```powershell
+cd D:\python\projects\ICBC-trading\harness-finmarket-multi-agent-collab\external\market-data-tools
+python -m backend.mcp_server
+```
+
+上面的命令用于人工检查 MCP 协议，启动后保持当前终端即可观察 stderr 日志；正常由主
+Agent 启动时不需要手动执行。
+
+## 八、HTTP 调用（测试和兼容）
+
+以下五个接口继续保留，用于前端、独立业务路线测试和旧调用方兼容：
 
 ```text
 POST /tools/unified_search
