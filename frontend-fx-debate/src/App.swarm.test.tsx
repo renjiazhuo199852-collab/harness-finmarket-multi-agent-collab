@@ -50,11 +50,11 @@ const fxPresetDetail = {
   used_variables: ["target"],
   source: "bundled",
   agents: [
-    { id: "pair_bull", role: "Pair Bull", tools: ["get_fx_evidence_manifest"], skills: [] },
-    { id: "pair_bear", role: "Pair Bear", tools: [], skills: ["market-analysis"] },
-    { id: "macro_technical", role: "Macro Technical Analyst", tools: ["get_fx_evidence_manifest"], skills: ["macro-analysis"] },
-    { id: "fx_risk_officer", role: "FX Risk Officer", tools: [], skills: ["risk_review"] },
-    { id: "debate_judge", role: "Debate Judge", tools: [], skills: ["portfolio-construction"] },
+    { id: "pair_bull", role: "Pair Bull", tools: ["get_fx_evidence_manifest"], skills: ["fx-hypothesis-falsification"] },
+    { id: "pair_bear", role: "Pair Bear", tools: [], skills: ["fx-hypothesis-falsification"] },
+    { id: "macro_technical", role: "Macro Technical Analyst", tools: ["get_fx_evidence_manifest"], skills: ["fx-relative-macro-interpretation", "fx-regime-cross-confirmation"] },
+    { id: "fx_risk_officer", role: "FX Risk Officer", tools: [], skills: ["fx-hypothesis-falsification", "fx-relative-macro-interpretation", "fx-regime-cross-confirmation", "risk-analysis"] },
+    { id: "debate_judge", role: "Debate Judge", tools: [], skills: ["fx-relative-macro-interpretation", "fx-regime-cross-confirmation", "risk-analysis", "hedging-strategy"] },
   ],
   tasks: [
     { id: "task-pair-bull", agent_id: "pair_bull", depends_on: [], input_from: {} },
@@ -160,8 +160,8 @@ describe("Swarm catalog UI", () => {
     expect(screen.queryByText("测试预设")).toBeNull();
     expect(screen.queryByText("开发与测试")).toBeNull();
     expect(screen.queryByText("外汇辩论流程测试团队")).toBeNull();
-    expect(screen.getByText("共 31 个团队")).toBeTruthy();
-    expect(screen.getByText("专业团队 31")).toBeTruthy();
+    expect(screen.getByText("31 个专业团队 · 7 个专业智能体")).toBeTruthy();
+    expect(screen.getByText("其中 1 个项目核心团队 · 5 个项目核心智能体")).toBeTruthy();
     expect(screen.getByText("专业智能体团队")).toBeTruthy();
     expect(screen.getAllByText("商品研究团队").length).toBeGreaterThan(0);
     expect(screen.getByText("从供给与需求两个方向并行开展商品研究，由周期策略智能体综合形成投资研判。")).toBeTruthy();
@@ -172,7 +172,7 @@ describe("Swarm catalog UI", () => {
     expect(screen.getAllByText("主要职责")).toHaveLength(7);
     expect(screen.getAllByText("货币对多头分析师")).toHaveLength(1);
     expect(screen.getAllByText("get_fx_evidence_manifest").length).toBeGreaterThan(0);
-    expect(screen.getByText("market-analysis")).toBeTruthy();
+    expect(screen.getAllByText("外汇假设证伪").length).toBeGreaterThan(0);
     expect(screen.getAllByText("5 个智能体").length).toBeGreaterThan(0);
     expect(screen.getAllByText("输入：研究标的 · 时间周期 · 研究目标").length).toBeGreaterThan(0);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain("/swarm/presets/fx_pair_debate_desk_smoke");
@@ -253,7 +253,7 @@ describe("Swarm catalog UI", () => {
     fireEvent.change(agentInput, { target: { value: "get_fx_evidence_manifest" } });
     expect(screen.getByText("货币对多头分析师")).toBeTruthy();
 
-    fireEvent.change(agentInput, { target: { value: "market-analysis" } });
+    fireEvent.change(agentInput, { target: { value: "fx-hypothesis-falsification" } });
     expect(screen.getByText("货币对空头分析师")).toBeTruthy();
 
     fireEvent.change(agentInput, { target: { value: "" } });

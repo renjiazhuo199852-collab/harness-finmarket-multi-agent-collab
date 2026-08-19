@@ -365,6 +365,22 @@ const ROLE_LABELS: Record<string, string> = {
   chair: "委员会主席",
 };
 
+const SKILL_LABELS: Record<string, string> = {
+  'fx-hypothesis-falsification': '外汇假设证伪',
+  'fx-regime-cross-confirmation': '外汇状态交叉确认',
+  'fx-relative-macro-interpretation': '外汇相对宏观解读',
+  'risk-analysis': '风险分析与压力测试',
+  'hedging-strategy': '对冲策略设计',
+  'correlation-analysis': '相关性与协整分析',
+  'correlation-regime': '相关性状态与危机归因',
+  'macro-analysis': '宏观周期与央行政策',
+  'global-macro': '全球宏观研究',
+  'cross-market-strategy': '跨市场策略',
+};
+
+export function skillLabel(skill: string): string {
+  return SKILL_LABELS[skill] || skill;
+}
 const PRESET_ROLE_OVERRIDES: Record<string, Record<string, string>> = {
   fx_pair_debate_desk_smoke: {
     pair_bull: "多头流程测试智能体",

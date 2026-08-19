@@ -185,7 +185,8 @@ agents:
       验证通过后，将与已验证 output 完全相同的唯一 JSON 对象置于 report.md 的 ```json 代码块中。
       不得新增方向性事实。
     tools: [get_fx_evidence_by_ids, validate_fx_output, write_file]
-    skills: []
+    skills: [fx-hypothesis-falsification, fx-relative-macro-interpretation,
+      fx-regime-cross-confirmation, risk-analysis]
     max_iterations: 15
     timeout_seconds: 600
     max_retries: 1
@@ -210,7 +211,8 @@ agents:
       三份完整 upstream_arguments，以及完整 risk_review。若失败，依据 errors 修订后重试。验证通过后，
       将与已验证 output 完全相同的唯一 JSON 对象置于 report.md 的 ```json 代码块中。不得下单。
     tools: [get_fx_evidence_by_ids, validate_fx_output, write_file]
-    skills: []
+    skills: [fx-relative-macro-interpretation, fx-regime-cross-confirmation,
+      risk-analysis, hedging-strategy]
     max_iterations: 18
     timeout_seconds: 600
     max_retries: 1

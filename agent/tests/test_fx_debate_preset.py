@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.swarm.models import SwarmAgentSpec
 from src.swarm.presets import inspect_preset, load_preset
 from src.swarm.worker import build_worker_prompt
@@ -20,6 +22,16 @@ def test_fx_debate_preset_has_three_stage_five_agent_dag() -> None:
         ["debate_judge"],
     ]
 
+    agents = {agent["id"]: agent for agent in report["agents"]}
+    assert agents["fx_risk_officer"]["skills"]
+    assert agents["debate_judge"]["skills"]
+    skills_root = Path(__file__).resolve().parents[1] / "src" / "skills"
+    referenced_skills = {
+        skill
+        for agent in report["agents"]
+        for skill in agent["skills"]
+    }
+    assert all((skills_root / skill / "SKILL.md").is_file() for skill in referenced_skills)
     allowed = {
         "load_skill",
         "get_fx_evidence_manifest",
