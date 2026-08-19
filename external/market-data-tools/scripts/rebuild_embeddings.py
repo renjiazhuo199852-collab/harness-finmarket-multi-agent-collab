@@ -39,7 +39,8 @@ HNSW_INDEXES = (
 )
 EXPECTED_ROW_COUNTS = {
     "instrument_search_documents": 188,
-    "dataset_search_documents": 7,
+    # INSTRUMENT_MASTER 作为目录数据集登记后，数据集检索文档总数为 8。
+    "dataset_search_documents": 8,
     "news_search_documents": 76,
 }
 

@@ -1,12 +1,22 @@
 # 数据库快照说明
 
-`full_database.sql` 是从服务器当前 `icbc_shared` 数据库导出的备份快照，包含：
+`full_database.sql` 是服务器基础数据库的备份快照，包含：
 
 - `source` Schema 的九张正式业务表和全部数据；
 - `ai_search` Schema 的三张检索文档表和全部 Embedding；
 - `halfvec(2048)` 向量列和三套 HNSW `halfvec_cosine_ops` 索引；
 - 当前向量模型为 SiliconFlow `Qwen/Qwen3-Embedding-8B`，请求维度为 `2048`；
 - 索引、约束、序列以及 `pg_trgm`、`vector` 扩展依赖。
+
+当前服务器目录还包含：
+
+- `source.dataset_catalog` 中的 `INSTRUMENT_MASTER` 目录记录；
+- `source.dataset_field_catalog` 中的 5 个标准化返回字段；
+- `ai_search.dataset_search_documents` 中对应的第 8 条数据集检索文档。
+
+本次目录增量对应的可重复迁移文件是
+`database/003_register_instrument_master.sql`，当前服务器已经执行完成；日常启动不需要
+再次执行该迁移文件。快照文件只用于灾备，不保证自动包含后续每一次目录增量。
 
 ## 日常使用
 
@@ -51,6 +61,11 @@ python .\scripts\check_config.py
 `.env` 或部署环境变量中。
 
 ## Embedding 模型切换
+
+新增或修改数据集目录后，只需要重新生成数据集检索文档和对应向量；不需要恢复整个
+数据库，也不需要重新生成 `instrument_search_documents` 的 188 条金融工具向量。
+
+本次 `INSTRUMENT_MASTER` 目录登记已经完成，服务器不需要再次执行迁移脚本。
 
 只有切换 Embedding 模型、模型维度或需要重新生成向量时，才执行：
 

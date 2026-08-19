@@ -25,6 +25,9 @@ _ROUTE_TABLES = {
     "market_bars_search": ("market_bars", "market_bars"),
     "macro_observations_search": ("macro_observations", "macro_observations"),
     "news_articles_search": ("news_articles", "news_articles"),
+    # 这是 HTTP/Python 兼容入口的范围约束，不是 MCP 工具注册项。MCP 仍然只
+    # 暴露 unified_search，由统一入口通过 dataset_catalog 发现本数据集。
+    "instrument_search": ("instrument_master", "instrument_master"),
 }
 
 
@@ -67,6 +70,7 @@ def run_tool_internal(
     route = _ROUTE_TABLES.get(name)
     compatibility_route = route[0] if route else None
     expected_table = route[1] if route else None
+    allowed_dataset_ids = {"INSTRUMENT_MASTER"} if name == "instrument_search" else None
 
     with psycopg2.connect(**database_connection_kwargs()) as connection:
         # AI Search 只读 source 和 ai_search，工具接口不允许修改业务数据库。
@@ -85,6 +89,7 @@ def run_tool_internal(
                 trace_callback=trace_callback,
                 compatibility_route=compatibility_route,
                 expected_storage_table_name=expected_table,
+                allowed_dataset_ids=allowed_dataset_ids,
             )
 
 
@@ -176,6 +181,21 @@ def news_articles_search(
         start_date=start_date,
         end_date=end_date,
         max_rows=1000,
+    )
+
+
+def instrument_search(query: str, max_rows: int = 1) -> dict[str, Any]:
+    """查询金融工具主数据并返回标准 canonical_symbol。
+
+    该函数供 HTTP 测试路由和本地调试使用，不会被加入 MCP 的工具定义；主 Agent
+    仍然只通过 unified_search 访问 AI Search。
+    """
+
+    return _public_call(
+        "instrument_search",
+        query=query,
+        provider=None,
+        max_rows=max_rows,
     )
 
 

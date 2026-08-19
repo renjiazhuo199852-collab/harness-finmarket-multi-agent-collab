@@ -27,7 +27,10 @@ from .env_config import load_project_env
 load_project_env()
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# 当前文件位于 backend/ai_search；项目根目录是向上两级的目录。
+# 这里必须指向根目录下的 sql，避免复制项目后把 SQL 错误地解析为
+# backend/sql/002_create_dataset_search_documents.sql。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_SQL = PROJECT_ROOT / "sql" / "002_create_dataset_search_documents.sql"
 
 

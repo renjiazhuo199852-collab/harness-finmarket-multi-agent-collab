@@ -22,7 +22,12 @@ POST /tools/latest_prices_search
 POST /tools/market_bars_search
 POST /tools/macro_observations_search
 POST /tools/news_articles_search
+POST /tools/instrument_search
 ```
+
+`instrument_search` 只用于 HTTP/Python 调试和兼容调用，负责从 `instrument_master` 中
+确认标准 `canonical_symbol`。它不会注册到 MCP；主 Agent 的 MCP 面始终只有
+`unified_search`，需要标准化金融工具时由统一查询内部选择 `INSTRUMENT_MASTER` 数据集。
 
 FX Debate 使用新增的只读证据接口：
 

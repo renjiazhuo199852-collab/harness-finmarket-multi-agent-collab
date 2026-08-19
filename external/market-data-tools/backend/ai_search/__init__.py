@@ -1,7 +1,8 @@
 """Agent 可调用的 AI Search 工具包。
 
-这里集中导出五个稳定的 Python 工具函数。查询细节仍由内部编排器、目录和
-业务适配器完成，Agent 不需要知道物理表名、字段名或 SQL。
+这里集中导出五个稳定的 Python 工具函数。instrument_search 是内部/HTTP 兼容
+路由，不加入 MCP 或默认 Agent 工具定义。查询细节仍由内部编排器、目录和业务
+适配器完成，Agent 不需要知道物理表名、字段名或 SQL。
 """
 
 from .tool_registry import (

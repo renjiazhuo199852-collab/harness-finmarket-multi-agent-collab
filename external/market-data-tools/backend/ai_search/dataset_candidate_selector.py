@@ -97,6 +97,7 @@ def _call_chat_model(
             "description": candidate.get("description"),
             "frequency": candidate.get("frequency"),
             "data_category": candidate.get("data_category"),
+            "access_method": candidate.get("access_method"),
             "rrf_score": candidate.get("rrf_score"),
             "matched_by": candidate.get("matched_by", []),
         }
@@ -106,8 +107,12 @@ def _call_chat_model(
 
     system_prompt = """你是受控的数据集目录候选筛选器。
 你只能从 user_candidates 中选择 dataset_id，绝对不能创造候选列表之外的 ID。
-根据用户原始问题和候选的数据集名称、分类、描述、频率判断最匹配的数据集。
+根据用户原始问题和候选的数据集名称、类型、分类、描述、频率和访问能力判断最匹配的数据集。
 你不能输出物理表名、字段名、SQL，也不能凭空补充目录信息。
+如果用户明确询问标准金融工具代码、canonical symbol 或工具标准化，优先选择候选中
+类型为 instrument_directory、分类为 Instrument 且描述包含标准化能力的数据集。
+如果用户询问的是价格、历史行情、宏观观测或新闻，则必须根据候选目录的业务描述
+选择相应数据集；不能因为查询主体是 EURUSD 就自动选择 Instrument 目录。
 只有一个候选明显匹配时才 decision=select；信息不足或多个候选同样合理时使用 needs_confirmation。
 返回严格 JSON，不要返回 Markdown，不要添加额外字段：
 {"decision":"select|needs_confirmation|not_found","dataset_id":"string|null","confidence":0,"reason":"string"}

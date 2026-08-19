@@ -523,6 +523,7 @@ def search_instrument_documents(
     provider: str | None = None,
     identifier_as_of_date: date | None = None,
     allowed_instrument_types: set[str] | None = None,
+    resolve_identifier: bool = True,
     trace_callback: TraceCallback | None = None,
 ) -> dict[str, Any]:
     """执行金融工具多路检索，并返回候选文档及检索状态。
@@ -660,7 +661,7 @@ def search_instrument_documents(
             },
             lambda value: value,
         )
-    if model_selection and model_selection.get("decision") == "select":
+    if model_selection and model_selection.get("decision") == "select" and resolve_identifier:
         identifier_query_date = identifier_as_of_date or date.today()
         identifier_resolution = _run_traced(
             trace_callback,
@@ -685,7 +686,12 @@ def search_instrument_documents(
             "instrument_identifier",
             {
                 "instrument_id": model_selection.get("instrument_id") if model_selection else None,
-                "reason": "没有最终选中的 active instrument_id，跳过供应商标识查询",
+                "reason": (
+                    "当前是 instrument_master 标准化查询，按路由要求跳过供应商标识查询"
+                    if model_selection and model_selection.get("decision") == "select"
+                    and not resolve_identifier
+                    else "没有最终选中的 active instrument_id，跳过供应商标识查询"
+                ),
             },
             lambda: {"status": "skipped", "candidates": []},
             lambda value: value,

@@ -19,6 +19,11 @@ import re
 from typing import Any, Callable
 
 from .latest_prices_adapter import LATEST_PRICES_TABLE, query_latest_prices
+from .instrument_master_adapter import (
+    INSTRUMENT_MASTER_FIELDS,
+    INSTRUMENT_MASTER_TABLE,
+    query_instrument_master,
+)
 from .macro_observation_request import (
     MACRO_FIELDS,
     parse_macro_observation_request,
@@ -69,6 +74,13 @@ ADAPTER_REGISTRY: dict[str, dict[str, Any]] = {
         "adapter": "news_articles",
         "fields": NEWS_FIELDS,
         "requires_instrument_identity": False,
+        "allowed_instrument_types": None,
+    },
+    INSTRUMENT_MASTER_TABLE: {
+        "adapter": "instrument_master",
+        "fields": INSTRUMENT_MASTER_FIELDS,
+        "requires_instrument_identity": False,
+        "resolves_instrument_master": True,
         "allowed_instrument_types": None,
     },
 }
@@ -478,6 +490,7 @@ def run_unified_query(
     query_understanding_override: dict[str, Any] | None = None,
     compatibility_route: str | None = None,
     expected_storage_table_name: str | None = None,
+    allowed_dataset_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """执行一次目录驱动的统一查询。"""
 
@@ -554,6 +567,7 @@ def run_unified_query(
         candidate_selection_query=clean_query,
         candidate_selection_context=understanding,
         require_candidate_llm=True,
+        allowed_dataset_ids=allowed_dataset_ids,
         trace_callback=trace_callback,
     )
     dataset_resolution = dataset_search.get("dataset_resolution") or {}
@@ -732,7 +746,78 @@ def run_unified_query(
 
     instrument_search: dict[str, Any] | None = None
     selected_identifier: dict[str, Any] | None = None
-    if adapter_spec["requires_instrument_identity"]:
+    if adapter_spec.get("resolves_instrument_master"):
+        # 这是“只查标准金融工具”的数据集适配器。它复用同一套金融工具四路检索
+        # 和 active 状态校验，但明确跳过 instrument_identifier，因为本路由不需要
+        # 供应商代码，只需要返回 instrument_master 的 canonical_symbol。
+        subject_text = understanding.get("subject_text")
+        subject_search_text = understanding.get("subject_search_text") or subject_text
+        if not subject_text or not subject_search_text:
+            reason = "查询理解没有提取到需要标准化的金融工具主体"
+            execution = _rejected_execution("INSTRUMENT_NOT_FOUND", reason)
+            result = {
+                "status": "rejected",
+                "query": clean_query,
+                "query_understanding": understanding,
+                "dataset_query": dataset_query,
+                "dataset_search": dataset_search,
+                "dataset_resolution": dataset_resolution,
+                "dataset_consistency_check": dataset_consistency,
+                "request_resolution": adapter_request,
+                "field_resolution": field_resolution,
+                "instrument_search": None,
+                "instrument_resolution": None,
+                "identifier_resolution": None,
+                "execution": execution,
+                "warnings": [reason],
+            }
+            return _compatibility_result(
+                result,
+                compatibility_route=compatibility_route,
+                expected_storage_table_name=expected_storage_table_name,
+            )
+
+        instrument_search = search_instrument_documents(
+            cursor,
+            subject_search_text,
+            limit=limit,
+            use_embedding=use_embedding,
+            use_candidate_llm=use_candidate_llm,
+            allowed_instrument_types=adapter_spec["allowed_instrument_types"],
+            resolve_identifier=False,
+            trace_callback=trace_callback,
+        )
+        model_selection = instrument_search.get("model_selection") or {}
+        if model_selection.get("decision") != "select":
+            reason = model_selection.get("reason") or "金融工具候选没有通过模型筛选"
+            code = (
+                "INSTRUMENT_AMBIGUOUS"
+                if model_selection.get("decision") == "needs_confirmation"
+                else "INSTRUMENT_NOT_FOUND"
+            )
+            execution = _rejected_execution(code, reason)
+            result = {
+                "status": "rejected",
+                "query": clean_query,
+                "query_understanding": understanding,
+                "dataset_query": dataset_query,
+                "dataset_search": dataset_search,
+                "dataset_resolution": dataset_resolution,
+                "dataset_consistency_check": dataset_consistency,
+                "request_resolution": adapter_request,
+                "field_resolution": field_resolution,
+                "instrument_search": instrument_search,
+                "instrument_resolution": instrument_search,
+                "identifier_resolution": None,
+                "execution": execution,
+                "warnings": [reason],
+            }
+            return _compatibility_result(
+                result,
+                compatibility_route=compatibility_route,
+                expected_storage_table_name=expected_storage_table_name,
+            )
+    elif adapter_spec["requires_instrument_identity"]:
         subject_text = understanding.get("subject_text")
         subject_search_text = understanding.get("subject_search_text") or subject_text
         if not subject_text or not subject_search_text:
@@ -875,6 +960,15 @@ def run_unified_query(
                 selected_tool["instrument_id"],
                 selected_identifier["provider"],
                 selected_identifier["identifier"],
+                dataset_resolution,
+                field_resolution,
+                limit=1,
+            )
+        if storage_table_name == INSTRUMENT_MASTER_TABLE:
+            selected_tool = (instrument_search or {}).get("model_selection") or {}
+            return query_instrument_master(
+                cursor,
+                selected_tool["instrument_id"],
                 dataset_resolution,
                 field_resolution,
                 limit=1,

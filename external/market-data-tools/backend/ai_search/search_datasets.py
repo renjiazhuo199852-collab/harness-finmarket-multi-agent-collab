@@ -134,25 +134,45 @@ def _provider_filter(provider: str | None) -> tuple[str, list[Any]]:
     return "", []
 
 
+def _dataset_scope_filter(
+    allowed_dataset_ids: set[str] | None,
+) -> tuple[str, list[Any]]:
+    """为专用入口限制数据集候选范围。
+
+    范围来自受控路由配置，不来自用户或模型。过滤条件下推到四路召回，避免候选
+    在 RRF 截断前被其他数据集挤掉；统一入口不传该参数，因此仍检索目录中的全部
+    数据集。
+    """
+
+    if allowed_dataset_ids is None:
+        return "", []
+    if not allowed_dataset_ids:
+        return " AND FALSE", []
+    return " AND d.dataset_id = ANY(%s)", [sorted(allowed_dataset_ids)]
+
+
 def exact_search(
     cursor: Any,
     query: str,
     limit: int,
     provider: str | None = None,
+    allowed_dataset_ids: set[str] | None = None,
 ) -> list[tuple[Any, ...]]:
     """按数据集业务请求文本精确匹配 ``dataset_id``，不对用户文本做标准化。"""
 
     provider_clause, provider_params = _provider_filter(provider)
+    scope_clause, scope_params = _dataset_scope_filter(allowed_dataset_ids)
     sql = f"""
         SELECT document_id, dataset_id, dataset_name, dataset_type, provider,
                description, frequency, data_category, 1.0::double precision AS score
         FROM ai_search.dataset_search_documents AS d
         WHERE d.dataset_id = %s
         {provider_clause}
+        {scope_clause}
         ORDER BY document_id
         LIMIT %s
     """
-    cursor.execute(sql, tuple([query, *provider_params, limit]))
+    cursor.execute(sql, tuple([query, *provider_params, *scope_params, limit]))
     return cursor.fetchall()
 
 
@@ -161,10 +181,12 @@ def keyword_search(
     query: str,
     limit: int,
     provider: str | None = None,
+    allowed_dataset_ids: set[str] | None = None,
 ) -> list[tuple[Any, ...]]:
     """用数据集文档的 ``search_vector`` 做全文关键词检索。"""
 
     provider_clause, provider_params = _provider_filter(provider)
+    scope_clause, scope_params = _dataset_scope_filter(allowed_dataset_ids)
     sql = f"""
         WITH queries AS (
             SELECT websearch_to_tsquery('simple', %s) AS query
@@ -182,10 +204,11 @@ def keyword_search(
         CROSS JOIN queries AS q
         WHERE d.search_vector @@ q.query
         {provider_clause}
+        {scope_clause}
         ORDER BY score DESC, d.document_id
         LIMIT %s
     """
-    cursor.execute(sql, tuple([query, *provider_params, limit]))
+    cursor.execute(sql, tuple([query, *provider_params, *scope_params, limit]))
     return cursor.fetchall()
 
 
@@ -194,10 +217,12 @@ def trigram_search(
     query: str,
     limit: int,
     provider: str | None = None,
+    allowed_dataset_ids: set[str] | None = None,
 ) -> list[tuple[Any, ...]]:
     """用 ``pg_trgm`` 比较数据集编号、名称和业务分类。"""
 
     provider_clause, provider_params = _provider_filter(provider)
+    scope_clause, scope_params = _dataset_scope_filter(allowed_dataset_ids)
     sql = f"""
         SELECT d.document_id,
                d.dataset_id,
@@ -219,11 +244,13 @@ def trigram_search(
                   similarity(d.data_category, %s)
               ) >= %s
         {provider_clause}
+        {scope_clause}
         ORDER BY score DESC, d.document_id
         LIMIT %s
     """
     parameters = [query, query, query, query, query, query, TRIGRAM_THRESHOLD]
     parameters.extend(provider_params)
+    parameters.extend(scope_params)
     parameters.append(limit)
     cursor.execute(sql, tuple(parameters))
     return cursor.fetchall()
@@ -234,6 +261,7 @@ def embedding_search(
     query: str,
     limit: int,
     provider: str | None = None,
+    allowed_dataset_ids: set[str] | None = None,
 ) -> tuple[list[tuple[Any, ...]], str | None]:
     """使用当前配置的 Embedding 模型做数据集业务语义检索。
 
@@ -271,6 +299,7 @@ def embedding_search(
     storage_type = storage_type_row[0] if storage_type_row else None
     vector_text = "[" + ",".join(str(value) for value in vector) + "]"
     provider_clause, provider_params = _provider_filter(provider)
+    scope_clause, scope_params = _dataset_scope_filter(allowed_dataset_ids)
 
     if storage_type == "halfvec":
         sql = f"""
@@ -286,10 +315,11 @@ def embedding_search(
             FROM ai_search.dataset_search_documents AS d
             WHERE d.embedding IS NOT NULL
             {provider_clause}
+            {scope_clause}
             ORDER BY d.embedding <=> %s::halfvec, d.document_id
             LIMIT %s
         """
-        parameters = [vector_text, *provider_params, vector_text, limit]
+        parameters = [vector_text, *provider_params, *scope_params, vector_text, limit]
         cursor.execute(sql, tuple(parameters))
         return cursor.fetchall(), None
 
@@ -307,9 +337,10 @@ def embedding_search(
         FROM ai_search.dataset_search_documents AS d
         WHERE d.embedding IS NOT NULL
         {provider_clause}
+        {scope_clause}
         ORDER BY d.document_id
     """
-    cursor.execute(sql, tuple(provider_params))
+    cursor.execute(sql, tuple([*provider_params, *scope_params]))
     query_norm = math.sqrt(sum(float(value) * float(value) for value in vector))
     scored_rows: list[tuple[Any, ...]] = []
     for (
@@ -582,7 +613,7 @@ def search_dataset_documents(
                 "match_fields": ["dataset_id"],
                 "provider": provider,
             },
-            lambda: exact_search(cursor, query, limit, provider),
+            lambda: exact_search(cursor, query, limit, provider, allowed_dataset_ids),
             _dataset_rows_for_trace,
         ),
         "keyword": _run_traced(
@@ -601,7 +632,7 @@ def search_dataset_documents(
                 ],
                 "provider": provider,
             },
-            lambda: keyword_search(cursor, query, limit, provider),
+            lambda: keyword_search(cursor, query, limit, provider, allowed_dataset_ids),
             _dataset_rows_for_trace,
         ),
         "pg_trgm": _run_traced(
@@ -614,7 +645,7 @@ def search_dataset_documents(
                 "threshold": TRIGRAM_THRESHOLD,
                 "provider": provider,
             },
-            lambda: trigram_search(cursor, query, limit, provider),
+            lambda: trigram_search(cursor, query, limit, provider, allowed_dataset_ids),
             _dataset_rows_for_trace,
         ),
     }
@@ -640,7 +671,7 @@ def search_dataset_documents(
                 ],
                 "provider": provider,
             },
-            lambda: embedding_search(cursor, query, limit, provider),
+            lambda: embedding_search(cursor, query, limit, provider, allowed_dataset_ids),
             _embedding_result_for_trace,
         )
         embedding_rows, embedding_warning = embedding_result

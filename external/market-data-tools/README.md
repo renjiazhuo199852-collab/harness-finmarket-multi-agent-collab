@@ -5,6 +5,7 @@
 - 查询解析、数据集目录发现、金融工具确认、字段目录解析和四张业务表适配器；
 - Embedding 语义检索和聊天模型候选筛选；
 - 一个统一查询工具和四个独立业务工具；
+- 一个仅供 HTTP/Python 测试的 `instrument_search` 标准金融工具路由；
 - Python 函数接口、MCP stdio 接口、HTTP 接口和 Agent 函数工具定义；
 - 数据库完整快照、前端测试工作台和接口协议测试。
 
@@ -22,6 +23,7 @@
 - `source` Schema 和 9 张正式业务表；
 - `ai_search` Schema 和 3 张检索表；
 - 全部检索文档、`halfvec(2048)` Embedding 和 HNSW 索引；
+- `source.dataset_catalog` 已登记 `INSTRUMENT_MASTER`，数据集检索文档共 8 条；
 - `pg_trgm`、pgvector 扩展、索引和约束。
 
 复制本 `tools` 文件夹后，日常使用只需要建立 SSH 隧道、安装依赖并启动后端。**不要**执行
@@ -49,6 +51,15 @@
 
 新闻工具不限制最终新闻候选条数。`max_rows` 不是新闻工具的输入参数。
 Agent 不需要也不能传入 `route`、物理表名、字段名、SQL、Embedding 开关或候选模型开关。
+
+标准金融工具路由：
+
+```text
+POST /tools/instrument_search
+```
+
+它只用于把用户输入解析为 `instrument_master` 中已经存在且 active 的标准
+`canonical_symbol`。该路由不是第二个 MCP 工具，主 Agent 仍然只调用 `unified_search`。
 
 ## MCP stdio 接入
 
@@ -97,7 +108,21 @@ latest_prices       -> latest_prices 适配器
 market_bars         -> market_bars 适配器
 macro_observations  -> macro_observations 适配器
 news_articles       -> news_articles 适配器
+instrument_master   -> instrument_master 标准化适配器
 ```
+
+只查询标准金融工具时，统一入口会选择 `INSTRUMENT_MASTER` 数据集：
+
+```text
+查询欧元兑美元的标准代码
+  -> dataset_catalog 选择 INSTRUMENT_MASTER
+  -> dataset_field_catalog 确认标准化返回字段
+  -> instrument_search_documents 四路检索
+  -> source.instrument_master 正式回查
+  -> 返回 canonical_symbol
+```
+
+该场景跳过 `instrument_identifier`，因为当前只需要标准代码，不需要供应商代码。
 
 结构化业务路线会确认金融工具和供应商标识：
 
@@ -293,7 +318,7 @@ Agent 启动时不需要手动执行。
 
 ## 八、HTTP 调用（测试和兼容）
 
-以下五个接口继续保留，用于前端、独立业务路线测试和旧调用方兼容：
+以下接口用于前端、独立业务路线测试和旧调用方兼容：
 
 ```text
 POST /tools/unified_search
@@ -301,6 +326,7 @@ POST /tools/latest_prices_search
 POST /tools/market_bars_search
 POST /tools/macro_observations_search
 POST /tools/news_articles_search
+POST /tools/instrument_search
 ```
 
 统一查询示例：
@@ -334,7 +360,7 @@ Invoke-RestMethod `
 }
 ```
 
-调试前端使用的 SSE 接口在五个正式路径后追加 `/stream`，例如：
+调试前端使用的 SSE 接口在正式查询路径后追加 `/stream`，例如：
 
 ```text
 POST /tools/unified_search/stream
@@ -425,11 +451,13 @@ python .\scripts\check_config.py
   -> 检查 tools/.env 和服务器数据库连接
   -> 启动后端
   -> 启动前端
-  -> 调用五个工具
+  -> 调用五个默认工具；标准化路由通过统一接口或 HTTP 兼容入口验证
   -> 验证四张业务表均返回真实结果
 ```
 
-服务器端数据已经准备完成，验收流程不包含数据库恢复或 Embedding 重建。
+服务器端数据已经准备完成，验收流程不包含数据库恢复或 Embedding 重建。当前目录新增
+`INSTRUMENT_MASTER` 后，服务器已有 8 条数据集目录记录、29 条字段目录记录；日常启动不
+需要再次执行目录迁移或向量重建。
 
 当前目录的 `legacy_tests` 保存原开发项目的历史测试样本；可移植项目默认运行
 `tests` 下针对工具注册、HTTP 边界和公开响应协议的测试。

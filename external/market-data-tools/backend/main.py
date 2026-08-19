@@ -44,6 +44,14 @@ class ToolRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class InstrumentSearchRequest(BaseModel):
+    """标准金融工具路由的受控请求，不接受 provider、表名或 SQL。"""
+
+    query: str = Field(min_length=1, max_length=1000)
+    max_rows: int = Field(default=1, ge=1, le=10)
+    model_config = ConfigDict(extra="forbid")
+
+
 def _arguments(request: ToolRequest) -> dict[str, Any]:
     """兼容 Pydantic v1/v2，把请求转换为工具函数参数。"""
 
@@ -163,11 +171,22 @@ def _endpoint(name: str):
     return handler
 
 
+def _instrument_endpoint(request: InstrumentSearchRequest) -> dict[str, Any]:
+    """执行独立 instrument_search HTTP 路由，并保持 status + data 协议。"""
+
+    try:
+        arguments = _arguments(request)
+        return build_public_response(run_tool_internal("instrument_search", **arguments))
+    except Exception as exc:  # noqa: BLE001 - 路由需要稳定的结构化错误
+        return build_public_error(type(exc).__name__, str(exc))
+
+
 app.post("/tools/unified_search")(_endpoint("unified_search"))
 app.post("/tools/latest_prices_search")(_endpoint("latest_prices_search"))
 app.post("/tools/market_bars_search")(_endpoint("market_bars_search"))
 app.post("/tools/macro_observations_search")(_endpoint("macro_observations_search"))
 app.post("/tools/news_articles_search")(_endpoint("news_articles_search"))
+app.post("/tools/instrument_search")(_instrument_endpoint)
 
 
 _EVIDENCE_TOOLS = {

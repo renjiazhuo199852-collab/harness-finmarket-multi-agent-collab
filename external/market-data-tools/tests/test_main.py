@@ -51,3 +51,49 @@ def test_all_five_tool_paths_are_registered(monkeypatch) -> None:
         response = client.post(path, json={"query": "测试"})
         assert response.status_code == 200
         assert response.json() == {"status": "success", "data": []}
+
+
+def test_instrument_search_path_is_http_only(monkeypatch) -> None:
+    """标准金融工具路由可以通过 HTTP 调试，但不改变 MCP 工具面。"""
+
+    monkeypatch.setattr(
+        main,
+        "run_tool_internal",
+        lambda _name, **_arguments: {
+            "status": "success",
+            "adapter": "instrument_master",
+            "execution": {
+                "status": "resolved",
+                "adapter": "instrument_master",
+                "rows": [
+                    {
+                        "instrument_id": "FX_EURUSD",
+                        "canonical_symbol": "EUR/USD",
+                        "name": "EUR/USD Spot",
+                        "instrument_type": "FX",
+                        "status": "active",
+                    }
+                ],
+            },
+        },
+    )
+    client = TestClient(app)
+    response = client.post("/tools/instrument_search", json={"query": "EURUSD"})
+    assert response.status_code == 200
+    assert response.json()["data"][0]["canonical_symbol"] == "EUR/USD"
+
+
+def test_instrument_search_does_not_accept_provider(monkeypatch) -> None:
+    """instrument_master 没有 provider 维度，路由必须拒绝该额外参数。"""
+
+    monkeypatch.setattr(
+        main,
+        "run_tool_internal",
+        lambda _name, **_arguments: {"status": "success", "execution": {"status": "resolved", "rows": []}},
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/tools/instrument_search",
+        json={"query": "EURUSD", "provider": "LSEG"},
+    )
+    assert response.status_code == 422

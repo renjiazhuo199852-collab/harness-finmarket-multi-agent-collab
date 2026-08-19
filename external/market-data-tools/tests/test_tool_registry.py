@@ -58,3 +58,28 @@ def test_public_wrapper_hides_internal_result(monkeypatch) -> None:
         "status": "success",
         "data": [{"last": "1.15", "bid": "1.14"}],
     }
+
+
+def test_instrument_search_is_not_added_to_default_definitions(monkeypatch) -> None:
+    """instrument_search 是兼容 HTTP/Python 路由，不进入默认 Agent 工具清单。"""
+
+    monkeypatch.setattr(
+        tool_registry,
+        "run_tool_internal",
+        lambda *_args, **_kwargs: {
+            "status": "success",
+            "adapter": "instrument_master",
+            "execution": {
+                "status": "resolved",
+                "adapter": "instrument_master",
+                "rows": [{"canonical_symbol": "EUR/USD"}],
+            },
+        },
+    )
+    result = tool_registry.instrument_search("EURUSD")
+    assert result == {
+        "status": "success",
+        "data": [{"canonical_symbol": "EUR/USD"}],
+    }
+    names = [item["function"]["name"] for item in tool_registry.get_tool_definitions()]
+    assert "instrument_search" not in names
