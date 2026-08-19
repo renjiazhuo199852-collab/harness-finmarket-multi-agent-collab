@@ -18,6 +18,7 @@ interface PresetDisplay {
   title: string;
   description: string;
   category: PresetCategory;
+  searchAliases?: string[];
   badge: "项目核心" | "平台内置" | "本地自定义" | "测试预设";
   isCore?: boolean;
   isTesting?: boolean;
@@ -107,6 +108,7 @@ const PRESET_DISPLAY: Record<string, PresetDisplay> = {
     title: "外汇多智能体辩论团队",
     description: "围绕指定货币对，由多头、空头、宏观技术、风控和裁决智能体协作，形成证据约束的外汇决策结论。",
     category: "宏观与外汇",
+    searchAliases: ["宏观与外汇", "外汇与宏观", "外汇", "FX", "Forex", "宏观", "Macro"],
     badge: "项目核心",
     isCore: true,
   },

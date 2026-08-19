@@ -406,3 +406,23 @@ code, pre, .topbar-center code, .run-id code { font-family: "DM Mono", ui-monosp
   .swarm-card { min-height: 0; }
   .swarm-card h3, .swarm-card p { min-height: 0; }
 }
+.agent-catalog-section .section-heading { align-items: flex-end; }
+.agent-catalog-section .section-heading p { margin: 5px 0 0; color: var(--text-faint); font-size: 10px; line-height: 1.5; }
+.agent-catalog-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: -2px 0 15px; }
+.agent-catalog-controls .swarm-search { min-width: min(360px, 100%); }
+.agent-catalog-controls .swarm-category-row { margin: 0; }
+.agent-catalog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+.agent-catalog-card { min-width: 0; display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 7px 22px color-mix(in srgb, var(--text) 4%, transparent); }
+.agent-catalog-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.agent-catalog-title { min-width: 0; flex: 1; }.agent-catalog-title strong, .agent-catalog-title span { display: block; }.agent-catalog-title strong { overflow: hidden; font-size: 13px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }.agent-catalog-title span { margin-top: 4px; color: var(--text-faint); font-family: "DM Mono", monospace; font-size: 9px; }
+.agent-catalog-responsibility { min-height: 76px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-soft); }.agent-catalog-responsibility span, .agent-catalog-team span, .agent-catalog-capability > span { display: block; margin-bottom: 5px; color: var(--text-faint); font-size: 9px; }.agent-catalog-responsibility p { margin: 0; color: var(--text-soft); font-size: 10px; line-height: 1.6; }
+.agent-catalog-team { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; align-items: baseline; }.agent-catalog-team span { margin: 0; }.agent-catalog-team strong { min-width: 0; overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-catalog-capability { min-width: 0; }.agent-catalog-capability > span { margin-bottom: 6px; }.agent-catalog-chips { display: flex; flex-wrap: wrap; gap: 5px; }.agent-catalog-chips span, .agent-catalog-chips em { display: inline-flex; align-items: center; min-height: 22px; max-width: 100%; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-soft); background: var(--surface-soft); font-family: "DM Mono", monospace; font-size: 8px; font-style: normal; overflow-wrap: anywhere; }.agent-catalog-chips em { color: var(--text-faint); font-family: inherit; }
+.agent-catalog-open { align-self: flex-start; margin-top: auto; padding-left: 0; }
+
+@media (min-width: 900px) and (max-width: 1199px) {
+  .agent-catalog-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .agent-catalog-grid { grid-template-columns: 1fr; }
+}
