@@ -69,6 +69,17 @@ EURUSD 最近一个月的日线行情”等数据问题。Debate 运行时则由
 用于兼容已有调用方，但底层统一通过 MCP 的 `unified_search` 完成。
 
 正常启动主 Agent 时不需要单独启动 HTTP 服务；AI Search MCP 子进程由主 Agent 按需启动。
+
+## MCP 阶段事件
+
+`unified_search` 的正常返回仍然是精简的 `status + data`。查询执行期间，服务会通过
+MCP progress 通知发送实际产生的阶段事件，例如查询解析、数据集检索、候选判断、字段
+目录读取、金融工具解析和业务表查询。主 Agent 将这些事件转成 Session SSE，
+`frontend-fx-debate/?view=logs` 会按真实顺序显示完整输入、输出、状态、耗时、错误和
+Trace ID。
+
+阶段事件不增加新的 MCP 工具，也不改变 `unified_search` 的入参；不同数据集需要的
+阶段由服务端实际执行结果决定。
 HTTP 服务仍可按本 README 的接口说明单独启动，用于前端和兼容测试。
 
 当前服务的 `market_bars` 适配器主要提供日线原始数据，因此缺少 4H 时系统会标记为证据

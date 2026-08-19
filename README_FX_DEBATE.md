@@ -170,6 +170,25 @@ GET  /health
 }
 ```
 
+### MCP 查询流程在前端展示
+
+MCP 的业务结果仍然只返回 `status + data`，但 `unified_search` 执行期间会通过 MCP
+标准 progress 通知发送 AI Search 的实际阶段。主 Agent 接收这些通知后，通过现有
+Session SSE 事件流传给 `frontend-fx-debate`。
+
+```text
+AI Search 阶段
+  → MCP progress
+  → 主 Agent MCP 客户端
+  → Session SSE
+  → 前端“流程日志”
+```
+
+在前端切换到 `/?view=logs`，可以看到本次调用实际执行的查询解析、数据集检索、
+候选判断、目录回查、字段读取、金融工具校验和业务适配器查询。每个阶段都可以展开
+查看阶段状态、顺序、Trace ID、耗时、输入、输出和错误。阶段由本次真实调用动态产生，
+新闻查询跳过的金融工具阶段不会被前端预设或伪造。
+
 `/v1/evidence/{tool_name}` 仍然保留给旧 HTTP 调用方，但 FX Debate 默认不再访问该接口。
 
 ## 数据查询 Agent 与五 Agent Debate 的关系

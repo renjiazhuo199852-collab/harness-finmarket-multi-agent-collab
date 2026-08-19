@@ -1,6 +1,6 @@
 export type WorkspaceView = "chat" | "swarm" | "canvas" | "data" | "logs" | "report" | "settings";
 export type RunStatus = "idle" | "pending" | "running" | "completed" | "failed" | "cancelled";
-export type EventLayer = "AGENT" | "TOOL" | "SDK" | "DATABASE" | "SYSTEM";
+export type EventLayer = "AGENT" | "TOOL" | "MCP" | "SDK" | "DATABASE" | "SYSTEM";
 
 export interface SessionItem {
   session_id: string;
@@ -127,6 +127,11 @@ export interface WorkspaceEvent {
   taskId?: string;
   status?: string;
   timestamp: string;
+  traceId?: string;
+  sequence?: number;
+  stage?: string;
+  durationMs?: number;
+  error?: string;
   input?: unknown;
   output?: unknown;
   raw: unknown;

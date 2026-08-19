@@ -289,7 +289,7 @@ code, pre, .topbar-center code, .run-id code { font-family: "DM Mono", ui-monosp
 .event-head { min-height: 40px; background: var(--surface-soft); color: var(--text-faint); font-size: 10px; }
 .event-row time { color: var(--text-faint); font-family: "DM Mono", monospace; font-size: 10px; }
 .layer-pill { justify-self: start; padding: 4px 6px; border: 1px solid currentColor; border-radius: 4px; font-family: "DM Mono", monospace; font-size: 9px; }
-.layer-agent { color: #7b61c4; }.layer-tool { color: var(--blue); }.layer-sdk { color: #2c9a9d; }.layer-database { color: #77a552; }.layer-system { color: var(--text-faint); }
+.layer-agent { color: #7b61c4; }.layer-tool { color: var(--blue); }.layer-mcp { color: #d27a2c; }.layer-sdk { color: #2c9a9d; }.layer-database { color: #77a552; }.layer-system { color: var(--text-faint); }
 .event-name { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .event-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .event-name small { color: var(--text-soft); font-size: 10px; }

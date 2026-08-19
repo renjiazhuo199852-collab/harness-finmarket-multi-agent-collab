@@ -152,6 +152,33 @@ describe("FX workspace event reducer", () => {
     expect(snapshot.events[0].label).toBe("market_bars_search");
   });
 
+  it("shows real MCP stages with their complete trace metadata", () => {
+    const snapshot = applySessionEvent(emptySnapshot("session-mcp"), {
+      id: "evt-mcp-stage",
+      type: "data_service.stage",
+      data: {
+        type: "mcp_stage",
+        trace_id: "trace-1",
+        sequence: 3,
+        stage: "dataset_catalog",
+        status: "completed",
+        input: { query: "查询 EURUSD 新闻" },
+        output: { dataset_id: "LSEG_NEWS", storage_table_name: "news_articles" },
+        duration_ms: 12.5,
+        error: null,
+      },
+    });
+
+    expect(snapshot.events[0].layer).toBe("MCP");
+    expect(snapshot.events[0].type).toBe("mcp_stage");
+    expect(snapshot.events[0].stage).toBe("dataset_catalog");
+    expect(snapshot.events[0].traceId).toBe("trace-1");
+    expect(snapshot.events[0].sequence).toBe(3);
+    expect(snapshot.events[0].durationMs).toBe(12.5);
+    expect(snapshot.events[0].input).toEqual({ query: "查询 EURUSD 新闻" });
+    expect(snapshot.events[0].output).toEqual({ dataset_id: "LSEG_NEWS", storage_table_name: "news_articles" });
+  });
+
   it("does not invent state for heartbeat events", () => {
     const snapshot = emptySnapshot("session-1");
     const next = applySessionEvent(snapshot, { type: "heartbeat", data: {} });

@@ -14,6 +14,7 @@ import os
 import shlex
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -299,12 +300,18 @@ class McpAiSearchClient:
             payload["end_date"] = _iso_date(end_date)
 
         started = time.perf_counter()
+        trace_id = uuid.uuid4().hex
         self._trace(
             "data_service.query_started",
-            {"transport": "mcp_stdio", "tool": tool, "input": payload},
+            {
+                "transport": "mcp_stdio",
+                "tool": tool,
+                "trace_id": trace_id,
+                "input": payload,
+            },
         )
         try:
-            result = _run_sync(lambda: self._call_mcp(payload))
+            result = _run_sync(lambda: self._call_mcp(payload, trace_id=trace_id))
             if not isinstance(result, dict):
                 raise FxDataServiceError(
                     "MCP 数据服务返回不是 JSON 对象", code="INVALID_DATA_RESPONSE"
@@ -321,6 +328,7 @@ class McpAiSearchClient:
                 {
                     "transport": "mcp_stdio",
                     "tool": tool,
+                    "trace_id": trace_id,
                     "duration_ms": round((time.perf_counter() - started) * 1000, 2),
                     "output": _summary(result),
                 },
@@ -329,7 +337,13 @@ class McpAiSearchClient:
         except FxDataServiceError as exc:
             self._trace(
                 "data_service.query_failed",
-                {"transport": "mcp_stdio", "tool": tool, "code": exc.code, "error": str(exc)},
+                {
+                    "transport": "mcp_stdio",
+                    "tool": tool,
+                    "trace_id": trace_id,
+                    "code": exc.code,
+                    "error": str(exc),
+                },
             )
             raise
         except (TimeoutError, OSError, RuntimeError, ValueError, TypeError) as exc:
@@ -338,12 +352,29 @@ class McpAiSearchClient:
             )
             self._trace(
                 "data_service.query_failed",
-                {"transport": "mcp_stdio", "tool": tool, "code": wrapped.code, "error": str(wrapped)},
+                {
+                    "transport": "mcp_stdio",
+                    "tool": tool,
+                    "trace_id": trace_id,
+                    "code": wrapped.code,
+                    "error": str(wrapped),
+                },
             )
             raise wrapped from exc
 
-    async def _call_mcp(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """启动 stdio 服务、调用工具并提取结构化返回值。"""
+    async def _call_mcp(
+        self,
+        payload: dict[str, Any],
+        *,
+        trace_id: str,
+    ) -> dict[str, Any]:
+        """启动 stdio 服务并转发 MCP progress 阶段事件。
+
+        AI Search 服务通过 MCP ``notifications/progress`` 发送每个内部阶段。
+        FastMCP 客户端会把通知交给本函数的异步回调；回调再转换成主 Agent
+        已有的同步 trace_callback 事件，最终由 Session SSE 推送到前端。查询
+        参数中不增加调试字段，因此 MCP 仍然只有一个稳定的 unified_search 工具。
+        """
 
         child_env = os.environ.copy()
         child_env.update(self.env)
@@ -354,17 +385,51 @@ class McpAiSearchClient:
             cwd=self.working_directory,
             keep_alive=False,
         )
+
+        async def on_progress(
+            progress: float,
+            total: float | None,
+            message: str | None,
+        ) -> None:
+            """把 MCP progress 消息还原为可在前端展开的完整阶段事件。"""
+
+            stage: dict[str, Any]
+            if message:
+                try:
+                    parsed = json.loads(message)
+                except (json.JSONDecodeError, TypeError):
+                    parsed = None
+                stage = dict(parsed) if isinstance(parsed, dict) else {"message": message}
+            else:
+                stage = {}
+            # MCP progress 消息内部带有 ``type=mcp_stage``，但主 Agent 的
+            # Session 事件类型必须固定为 ``data_service.stage``，否则字典展开
+            # 会覆盖外层事件类型，前端无法稳定按 MCP 层过滤和归类。
+            stage.pop("type", None)
+            stage.update(
+                {
+                    "transport": "mcp_stdio",
+                    "tool": "unified_search",
+                    "trace_id": trace_id,
+                    "progress": progress,
+                    "progress_total": total,
+                }
+            )
+            self._trace("data_service.stage", stage)
+
         async with Client(
             transport,
             name="fx-debate-ai-search",
             timeout=self.timeout_seconds,
             init_timeout=max(self.timeout_seconds, 30.0),
+            progress_handler=on_progress,
         ) as client:
             result = await client.call_tool(
                 "unified_search",
                 arguments=payload,
                 timeout=self.timeout_seconds,
                 raise_on_error=False,
+                progress_handler=on_progress,
             )
         return _extract_mcp_payload(result)
 

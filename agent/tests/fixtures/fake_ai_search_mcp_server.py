@@ -6,20 +6,43 @@
 
 from __future__ import annotations
 
-from fastmcp import FastMCP
+import json
+
+from fastmcp import Context, FastMCP
 
 mcp = FastMCP("fake-ai-search")
 
 
 @mcp.tool(name="unified_search")
-def unified_search(
+async def unified_search(
     query: str,
+    ctx: Context,
     provider: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     max_rows: int = 100,
 ) -> dict[str, object]:
     """返回调用参数，验证主 Agent 没有绕过统一工具。"""
+
+    # 测试服务模拟真实 AI Search：先发一个完整阶段，再返回业务结果，
+    # 用来验证主 Agent 的 MCP progress 接收而不是只验证最终 JSON。
+    await ctx.report_progress(
+        progress=1,
+        total=None,
+        message=json.dumps(
+            {
+                "type": "mcp_stage",
+                "sequence": 1,
+                "stage": "dataset_catalog",
+                "status": "completed",
+                "input": {"query": query},
+                "output": {"dataset_id": "LSEG_NEWS"},
+                "duration_ms": 1.5,
+                "error": None,
+            },
+            ensure_ascii=False,
+        ),
+    )
 
     return {
         "status": "success",

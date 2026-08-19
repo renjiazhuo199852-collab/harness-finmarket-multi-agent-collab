@@ -7,7 +7,8 @@ const KNOWN_EVENTS = [
   "message.received", "attempt.created", "attempt.started", "attempt.completed", "attempt.failed",
   "text_delta", "reasoning_delta", "thinking_done", "stream_reset", "tool_call", "tool_result",
   "tool_progress", "tool_heartbeat", "llm_usage", "swarm.started", "swarm.event",
-  "fx_debate.context_ready", "heartbeat", "done",
+  "data_service.query_started", "data_service.stage", "data_service.query_completed",
+  "data_service.query_failed", "fx_debate.context_ready", "heartbeat", "done",
 ];
 
 export class SessionTransport {

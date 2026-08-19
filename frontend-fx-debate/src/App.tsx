@@ -186,6 +186,42 @@ function EventLayerPill({ layer }: { layer: string }): ReactElement {
   return <span className={`layer-pill layer-${layer.toLowerCase()}`}>{layer}</span>;
 }
 
+const MCP_STAGE_LABELS: Record<string, string> = {
+  query_understanding: "查询解析",
+  dataset_query_context: "数据集查询上下文",
+  dataset_search_exact: "数据集精确检索",
+  dataset_search_keyword: "数据集关键词检索",
+  dataset_search_trigram: "数据集模糊检索",
+  dataset_search_embedding: "数据集语义检索",
+  dataset_search_rrf: "数据集检索结果合并",
+  dataset_exact_match: "数据集精确匹配",
+  dataset_keyword_search: "数据集关键词检索",
+  dataset_pg_trgm_search: "数据集模糊检索",
+  dataset_embedding_search: "数据集语义检索",
+  dataset_rrf_merge: "数据集检索结果合并",
+  dataset_candidate_selection: "数据集候选判断",
+  dataset_candidate_selector: "数据集候选判断",
+  dataset_consistency_check: "数据集一致性校验",
+  dataset_catalog: "dataset_catalog 回查",
+  dataset_field_catalog: "dataset_field_catalog 读取",
+  instrument_search: "金融工具检索",
+  exact_match: "金融工具精确匹配",
+  keyword_search: "金融工具关键词检索",
+  pg_trgm_search: "金融工具模糊检索",
+  embedding_search: "金融工具语义检索",
+  rrf_merge: "金融工具检索结果合并",
+  instrument_master: "instrument_master 回查",
+  instrument_identifier: "instrument_identifier 校验",
+  candidate_selector: "金融工具候选判断",
+  instrument_metric_link: "instrument_metric_link 读取",
+  compatibility_route_check: "兼容范围校验",
+  latest_prices_query: "最新价格查询",
+  market_bars_query: "历史行情查询",
+  macro_observations_query: "宏观指标查询",
+  news_articles_query: "新闻查询",
+  business_adapter_query: "业务适配器查询",
+};
+
 function EmptyState({ title, detail }: { title: string; detail: string }): ReactElement {
   return <div className="empty-state"><CircleDot size={24} /><strong>{title}</strong><span>{detail}</span></div>;
 }
@@ -551,8 +587,8 @@ function LogsView({ events, runStatus, onSelect }: { events: WorkspaceEvent[]; r
   const [filter, setFilter] = useState("ALL");
   const filtered = filter === "ALL" ? events : events.filter((event) => event.layer === filter);
   return <div className="workspace-view logs-view">
-    <div className="view-heading"><div><span className="eyebrow">EVENT STREAM</span><h2>流程日志</h2><p>完整调用链：Agent → Tool → SDK → Database。点击事件查看原始输入输出。</p></div><div className="filter-row">{["ALL", "AGENT", "TOOL", "SDK", "DATABASE", "SYSTEM"].map((value) => <button className={filter === value ? "filter-active" : ""} key={value} onClick={() => setFilter(value)}>{value === "ALL" ? "全部" : value}</button>)}</div></div>
-    {filtered.length === 0 ? <EmptyState title="暂无流程事件" detail="事件会随 Session SSE 实时到达。" /> : <div className="event-table"><div className="event-row event-head"><span>时间</span><span>层级</span><span>Agent / 操作</span><span>状态</span><span>输入输出</span></div>{[...filtered].reverse().map((event) => <button className="event-row" key={event.id} onClick={() => onSelect(event)}><time>{time(event.timestamp)}</time><EventLayerPill layer={event.layer} /><span className="event-name"><strong>{event.label}</strong><small>{event.agentId || event.taskId || "系统"}</small></span><StatusPill status={visibleEventStatus(event, runStatus)} /><span className="event-open">查看 <ChevronRight size={14} /></span></button>)}</div>}
+    <div className="view-heading"><div><span className="eyebrow">EVENT STREAM</span><h2>流程日志</h2><p>完整调用链：Agent → Tool → MCP → SDK → Database。MCP 阶段来自本次真实查询，点击事件查看完整输入输出。</p></div><div className="filter-row">{["ALL", "AGENT", "TOOL", "MCP", "SDK", "DATABASE", "SYSTEM"].map((value) => <button className={filter === value ? "filter-active" : ""} key={value} onClick={() => setFilter(value)}>{value === "ALL" ? "全部" : value}</button>)}</div></div>
+    {filtered.length === 0 ? <EmptyState title="暂无流程事件" detail="事件会随 Session SSE 实时到达。" /> : <div className="event-table"><div className="event-row event-head"><span>时间</span><span>层级</span><span>Agent / 操作</span><span>状态</span><span>输入输出</span></div>{[...filtered].reverse().map((event) => <button className="event-row" key={event.id} onClick={() => onSelect(event)}><time>{time(event.timestamp)}</time><EventLayerPill layer={event.layer} /><span className="event-name"><strong>{event.layer === "MCP" ? mcpStageDisplayName(event) : event.label}</strong><small>{event.agentId || event.taskId || "系统"}</small></span><StatusPill status={visibleEventStatus(event, runStatus)} /><span className="event-open">查看 <ChevronRight size={14} /></span></button>)}</div>}
   </div>;
 }
 
@@ -583,9 +619,17 @@ function eventDisplayName(type: string): string {
     tool_call: "调用工具",
     tool_result: "工具返回结果",
     context_ready: "证据上下文已准备",
+    "data_service.query_started": "MCP 查询开始",
+    "data_service.stage": "MCP 查询阶段",
+    "data_service.query_completed": "MCP 查询完成",
+    "data_service.query_failed": "MCP 查询失败",
     historical_completed: "历史运行已完成",
   };
   return labels[type] || type.split("_").join(" ");
+}
+
+function mcpStageDisplayName(event: WorkspaceEvent): string {
+  return event.stage ? MCP_STAGE_LABELS[event.stage] || event.stage : event.label;
 }
 
 function DetailBlock({ label, value, markdown = false }: { label: string; value: unknown; markdown?: boolean }): ReactElement | null {
@@ -608,7 +652,8 @@ function AgentDetail({ agent, events, workspaceStatus }: { agent: AgentSnapshot;
 }
 
 function EventDetail({ event, workspaceStatus }: { event: WorkspaceEvent; workspaceStatus: WorkspaceSnapshot["status"] }): ReactElement {
-  return <><div className="event-detail-hero"><EventLayerPill layer={event.layer} /><div><h3>{eventDisplayName(event.type)}</h3><span>{event.label} · {time(event.timestamp)}</span></div><StatusPill status={visibleEventStatus(event, workspaceStatus)} /></div><div className="event-detail-context"><span>Agent</span><strong>{event.agentId || "系统事件"}</strong><span>任务</span><strong>{event.taskId || "未标注"}</strong></div><DetailBlock label="输入" value={event.input} /><DetailBlock label="输出" value={event.output} markdown={typeof event.output === "string"} /><details className="raw-disclosure"><summary>查看完整原始事件 JSON</summary><pre>{json(event.raw)}</pre></details></>;
+  const isMcpStage = event.layer === "MCP";
+  return <><div className="event-detail-hero"><EventLayerPill layer={event.layer} /><div><h3>{isMcpStage ? mcpStageDisplayName(event) : eventDisplayName(event.type)}</h3><span>{event.label} · {time(event.timestamp)}</span></div><StatusPill status={visibleEventStatus(event, workspaceStatus)} /></div><div className="event-detail-context"><span>Agent</span><strong>{event.agentId || "系统事件"}</strong><span>任务</span><strong>{event.taskId || "未标注"}</strong>{event.traceId ? <><span>Trace ID</span><strong>{event.traceId}</strong></> : null}{event.sequence !== undefined ? <><span>阶段序号</span><strong>{event.sequence}</strong></> : null}{event.durationMs !== undefined ? <><span>耗时</span><strong>{event.durationMs} ms</strong></> : null}</div><DetailBlock label="输入" value={event.input} /><DetailBlock label="输出" value={event.output} markdown={typeof event.output === "string"} /><DetailBlock label="错误" value={event.error} /><details className="raw-disclosure"><summary>查看完整原始事件 JSON</summary><pre>{json(event.raw)}</pre></details></>;
 }
 
 function DetailDrawer({ title, data, events, workspaceStatus, onClose }: { title: string; data: AgentSnapshot | WorkspaceEvent; events: WorkspaceEvent[]; workspaceStatus: WorkspaceSnapshot["status"]; onClose: () => void }): ReactElement {

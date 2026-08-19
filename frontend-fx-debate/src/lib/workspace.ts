@@ -38,6 +38,11 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
+function asNumber(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export function normalizeFxAgentId(id?: string): string | undefined {
   if (!id) return undefined;
   return id === "risk_officer" ? "fx_risk_officer" : id;
@@ -46,6 +51,7 @@ export function normalizeFxAgentId(id?: string): string | undefined {
 function layerFor(type: string, data: Record<string, unknown>): EventLayer {
   const effectiveType = String(data.type || type);
   if (effectiveType === "context_ready" || type === "fx_debate.context_ready") return "SDK";
+  if (type === "data_service.stage" || effectiveType === "data_service.stage" || effectiveType === "mcp.stage" || effectiveType === "mcp_stage") return "MCP";
   if (effectiveType.startsWith("tool_")) return "TOOL";
   if (effectiveType.startsWith("data_service.")) return "SDK";
   if (effectiveType.includes("database") || effectiveType.includes("db") || String(data.layer || "").toLowerCase() === "database") return "DATABASE";
@@ -55,8 +61,11 @@ function layerFor(type: string, data: Record<string, unknown>): EventLayer {
 }
 
 function eventLabel(type: string, data: Record<string, unknown>): string {
+  const stage = asString(data.stage);
+  if (stage && (type === "data_service.stage" || type === "mcp.stage" || data.type === "mcp_stage")) return stage;
   const tool = asString(data.tool);
   if (tool) return tool;
+  if (stage) return stage;
   if (type === "swarm.event" && data.event && typeof data.event === "object") return String((data.event as Record<string, unknown>).type || type);
   return type.split(".").join(" ");
 }
@@ -71,6 +80,7 @@ function makeEvent(type: string, data: Record<string, unknown>, id: string, forc
   const displayData = { ...nested, ...eventData };
   const eventType = String(nested.type || type);
   const rawStatus = asString(eventData.status) || asString(nested.status) || asString(data.status);
+  const stage = asString(eventData.stage) || asString(nested.stage);
   return {
     id,
     type: eventType,
@@ -80,6 +90,11 @@ function makeEvent(type: string, data: Record<string, unknown>, id: string, forc
     taskId: asString(nested.task_id) || asString(data.task_id),
     status: eventType === "worker_failed" || eventType === "task_retry" ? "retrying" : rawStatus,
     timestamp: asString(nested.timestamp) || now(),
+    traceId: asString(eventData.trace_id) || asString(nested.trace_id),
+    sequence: asNumber(eventData.sequence) ?? asNumber(nested.sequence),
+    stage,
+    durationMs: asNumber(eventData.duration_ms) ?? asNumber(nested.duration_ms),
+    error: asString(eventData.error) || asString(nested.error),
     input: eventData.input || eventData.arguments || nested.input || nested.arguments,
     output: eventData.output || eventData.result || eventData.preview || eventData.result_preview
       || eventData.data_preview || (nested.type === "worker_text" ? eventData.content : undefined),

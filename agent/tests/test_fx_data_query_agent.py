@@ -158,6 +158,31 @@ def test_mcp_client_uses_stdio_and_only_unified_search() -> None:
     assert result["data"][0]["max_rows"] == 7
 
 
+def test_mcp_client_forwards_progress_stage_with_trace_id() -> None:
+    """主 Agent 接收到 MCP progress 后，向上游发送完整阶段和关联 ID。"""
+
+    fixture = Path(__file__).parent / "fixtures" / "fake_ai_search_mcp_server.py"
+    events: list[dict[str, object]] = []
+    client = McpAiSearchClient(
+        sys.executable,
+        [str(fixture)],
+        working_directory=str(fixture.parents[2]),
+        timeout_seconds=15,
+        trace_callback=events.append,
+    )
+
+    result = FxDataQueryAgent(client).query("查询 EURUSD 的相关新闻")
+
+    assert result["status"] == "success"
+    stage_events = [event for event in events if event["type"] == "data_service.stage"]
+    assert len(stage_events) == 1
+    assert stage_events[0]["stage"] == "dataset_catalog"
+    assert stage_events[0]["output"] == {"dataset_id": "LSEG_NEWS"}
+    trace_ids = {event.get("trace_id") for event in events}
+    assert len(trace_ids) == 1
+    assert next(iter(trace_ids))
+
+
 def test_mcp_client_reuses_unified_search_for_four_debate_queries() -> None:
     """四个证据计划都通过同一个 MCP 工具执行。"""
 
