@@ -114,6 +114,10 @@ FX Debate 对数据服务的默认入口是 `unified_search`。它通过数据�
 `news_articles_search` 仍然保留，主要用于数据端独立测试、顶层显式领域查询和兼容旧调用方。
 除非用户明确指定领域或兼容接口，新增代码应优先使用 `unified_search`。
 
+宏观相关查询由 AI Search 先确认货币对的 active `instrument_master` 记录，再读取
+`instrument_metric_link` 中登记的欧元区和美国 `METRIC` 关系，最后按
+`metric_id + source` 查询观测值；不会让模型自行猜测宏观指标。
+
 主 Agent 的 MCP stdio 面只注册 `unified_search`。四个独立工具不是已注册的 MCP 工具，
 也不会被删除；它们继续作为 AI Search 的 HTTP 测试和兼容接口存在。
 

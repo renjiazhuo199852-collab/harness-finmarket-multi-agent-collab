@@ -29,6 +29,7 @@ from .macro_observation_request import (
     parse_macro_observation_request,
 )
 from .macro_observations_adapter import query_macro_observations
+from .macro_observations_adapter import query_related_macro_observations
 from .market_bar_request import parse_market_bar_request
 from .market_bars_adapter import (
     MARKET_BAR_FIELDS,
@@ -42,6 +43,7 @@ from .resolve_dataset_fields import resolve_dataset_fields
 from .search_datasets import search_dataset_documents
 from .search_instruments import _run_traced, search_instrument_documents
 from .search_news import search_news_documents
+from .instrument_metric_link_adapter import resolve_instrument_metric_links
 
 
 TraceCallback = Callable[[dict[str, Any]], None]
@@ -69,6 +71,9 @@ ADAPTER_REGISTRY: dict[str, dict[str, Any]] = {
         "fields": MACRO_FIELDS,
         "requires_instrument_identity": True,
         "allowed_instrument_types": {"METRIC", "INTEREST_RATE", "BOND_YIELD"},
+        # 相关宏观查询先确认外汇主体，再由正式关系表解析指标；普通宏观查询
+        # 仍然按原有的 METRIC/INTEREST_RATE/BOND_YIELD 工具主数据流程执行。
+        "supports_related_subject": True,
     },
     NEWS_TABLE: {
         "adapter": "news_articles",
@@ -722,7 +727,13 @@ def run_unified_query(
     )
     if field_resolution.get("status") != "resolved":
         reason = str(field_resolution.get("reason") or "字段目录校验未通过")
-        execution = _rejected_execution("FIELD_RESOLUTION_FAILED", reason)
+        field_error_code = (
+            "MACRO_FIELD_RESOLUTION_FAILED"
+            if storage_table_name == "macro_observations"
+            and understanding.get("relation_scope") == "related_to_subject"
+            else "FIELD_RESOLUTION_FAILED"
+        )
+        execution = _rejected_execution(field_error_code, reason)
         result = {
             "status": "rejected",
             "query": clean_query,
@@ -740,6 +751,211 @@ def run_unified_query(
         }
         return _compatibility_result(
             result,
+            compatibility_route=compatibility_route,
+            expected_storage_table_name=expected_storage_table_name,
+        )
+
+    # “查询与 EURUSD 相关的宏观指标”与“查询美国 CPI”在主体含义上不同：前者
+    # 的主体是 FX 工具，不能把 FX_EURUSD 当成 macro_observations.instrument_id，
+    # 必须先从 instrument_master 确认主体，再读取 instrument_metric_link。关系表
+    # 返回的 metric_id 最终通过 metric_id + source 关联宏观观测，适配器不会让模型
+    # 猜测任何指标或关系。
+    is_related_macro = (
+        storage_table_name == "macro_observations"
+        and adapter_spec.get("supports_related_subject") is True
+        and understanding.get("relation_scope") == "related_to_subject"
+    )
+    if is_related_macro:
+        subject_text = understanding.get("subject_text")
+        subject_search_text = understanding.get("subject_search_text") or subject_text
+        if not subject_text or not subject_search_text:
+            reason = "相关宏观查询没有提取到金融工具主体"
+            execution = _rejected_execution("INSTRUMENT_NOT_FOUND", reason)
+            result = {
+                "status": "rejected",
+                "query": clean_query,
+                "query_understanding": understanding,
+                "dataset_query": dataset_query,
+                "dataset_search": dataset_search,
+                "dataset_resolution": dataset_resolution,
+                "dataset_consistency_check": dataset_consistency,
+                "request_resolution": adapter_request,
+                "field_resolution": field_resolution,
+                "instrument_search": None,
+                "instrument_resolution": None,
+                "identifier_resolution": None,
+                "relation_resolution": None,
+                "execution": execution,
+                "adapter": None,
+                "warnings": [reason],
+            }
+            return _compatibility_result(
+                result,
+                compatibility_route=compatibility_route,
+                expected_storage_table_name=expected_storage_table_name,
+            )
+
+        related_instrument_search = _run_traced(
+            trace_callback,
+            "related_subject_instrument_master",
+            {
+                "query": subject_search_text,
+                "subject_text": subject_text,
+                "allowed_instrument_types": ["FX"],
+                "resolve_identifier": False,
+            },
+            lambda: search_instrument_documents(
+                cursor,
+                subject_search_text,
+                limit=limit,
+                use_embedding=use_embedding,
+                use_candidate_llm=use_candidate_llm,
+                allowed_instrument_types={"FX"},
+                resolve_identifier=False,
+                trace_callback=trace_callback,
+            ),
+            lambda value: value,
+        )
+        related_selection = related_instrument_search.get("model_selection") or {}
+        if related_selection.get("decision") != "select":
+            reason = related_selection.get("reason") or "没有确认 active 的外汇主体"
+            code = (
+                "INSTRUMENT_AMBIGUOUS"
+                if related_selection.get("decision") == "needs_confirmation"
+                else "INSTRUMENT_NOT_FOUND"
+            )
+            execution = _rejected_execution(code, reason)
+            result = {
+                "status": "rejected",
+                "query": clean_query,
+                "query_understanding": understanding,
+                "dataset_query": dataset_query,
+                "dataset_search": dataset_search,
+                "dataset_resolution": dataset_resolution,
+                "dataset_consistency_check": dataset_consistency,
+                "request_resolution": adapter_request,
+                "field_resolution": field_resolution,
+                "instrument_search": related_instrument_search,
+                "instrument_resolution": related_instrument_search,
+                "identifier_resolution": None,
+                "relation_resolution": None,
+                "execution": execution,
+                "adapter": None,
+                "warnings": list(dataset_search.get("warnings") or []) + [reason],
+            }
+            return _compatibility_result(
+                result,
+                compatibility_route=compatibility_route,
+                expected_storage_table_name=expected_storage_table_name,
+            )
+
+        related_instrument_id = related_selection.get("instrument_id")
+        relation_provider = query_provider or dataset_resolution.get("provider")
+        relation_resolution = _run_traced(
+            trace_callback,
+            "instrument_metric_link",
+            {
+                "instrument_id": related_instrument_id,
+                "provider": relation_provider,
+                "as_of_date": _identifier_as_of_date(storage_table_name, adapter_request).isoformat(),
+                "allowed_roles": ["base_currency", "quote_currency"],
+            },
+            lambda: resolve_instrument_metric_links(
+                cursor,
+                related_instrument_id,
+                provider=relation_provider,
+                as_of_date=_identifier_as_of_date(storage_table_name, adapter_request),
+            ),
+            lambda value: value,
+        )
+        if relation_resolution.get("status") != "resolved":
+            relation_code = {
+                "provider_mismatch": "MACRO_RELATION_PROVIDER_MISMATCH",
+                "inactive": "MACRO_RELATION_INACTIVE",
+                "metric_not_found": "MACRO_METRIC_NOT_FOUND",
+            }.get(relation_resolution.get("status"), "MACRO_RELATION_NOT_FOUND")
+            reason = str(relation_resolution.get("reason") or "没有有效宏观关系")
+            execution = _rejected_execution(relation_code, reason)
+            result = {
+                "status": "rejected",
+                "query": clean_query,
+                "query_understanding": understanding,
+                "dataset_query": dataset_query,
+                "dataset_search": dataset_search,
+                "dataset_resolution": dataset_resolution,
+                "dataset_consistency_check": dataset_consistency,
+                "request_resolution": adapter_request,
+                "field_resolution": field_resolution,
+                "instrument_search": related_instrument_search,
+                "instrument_resolution": related_instrument_search,
+                "identifier_resolution": None,
+                "relation_resolution": relation_resolution,
+                "execution": execution,
+                "adapter": None,
+                "warnings": list(dataset_search.get("warnings") or []) + [reason],
+            }
+            return _compatibility_result(
+                result,
+                compatibility_route=compatibility_route,
+                expected_storage_table_name=expected_storage_table_name,
+            )
+
+        related_execution = _run_traced(
+            trace_callback,
+            "macro_related_observations_query",
+            {
+                "instrument_id": related_instrument_id,
+                "links": relation_resolution.get("links", []),
+                "dataset_id": dataset_resolution.get("dataset_id"),
+                "fields": [field.get("physical_column_name") for field in field_resolution.get("fields", [])],
+                "start_date": adapter_request.get("start_date") if adapter_request else None,
+                "end_date": adapter_request.get("end_date") if adapter_request else None,
+                "frequency": adapter_request.get("frequency") if adapter_request else None,
+                "limit": row_limit,
+            },
+            lambda: query_related_macro_observations(
+                cursor,
+                related_instrument_id,
+                relation_resolution.get("links", []),
+                dataset_resolution,
+                field_resolution,
+                start_date=(
+                    date.fromisoformat(adapter_request["start_date"])
+                    if adapter_request and adapter_request.get("start_date")
+                    else None
+                ),
+                end_date=(
+                    date.fromisoformat(adapter_request["end_date"])
+                    if adapter_request and adapter_request.get("end_date")
+                    else None
+                ),
+                frequency=adapter_request.get("frequency") if adapter_request else None,
+                limit=row_limit,
+            ),
+            lambda value: value,
+        )
+        related_status = related_execution.get("status")
+        related_result = {
+            "status": "success" if related_status in {"resolved", "not_found"} else "rejected",
+            "query": clean_query,
+            "query_understanding": understanding,
+            "dataset_query": dataset_query,
+            "dataset_search": dataset_search,
+            "dataset_resolution": dataset_resolution,
+            "dataset_consistency_check": dataset_consistency,
+            "request_resolution": adapter_request,
+            "field_resolution": field_resolution,
+            "instrument_search": related_instrument_search,
+            "instrument_resolution": related_instrument_search,
+            "identifier_resolution": None,
+            "relation_resolution": relation_resolution,
+            "execution": related_execution,
+            "adapter": adapter_spec["adapter"],
+            "warnings": list(dataset_search.get("warnings") or [])
+            + list(related_instrument_search.get("warnings") or []),
+        }
+        return _compatibility_result(
+            related_result,
             compatibility_route=compatibility_route,
             expected_storage_table_name=expected_storage_table_name,
         )

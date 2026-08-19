@@ -22,6 +22,7 @@ MACRO_FIELDS = (
     "forecast_value",
     "revised_value",
 )
+RELATED_MACRO_FIELDS = MACRO_FIELDS
 
 # 这些列是宏观路线固定的定位、时间和结果元数据，不允许用户或模型自由提交。
 # 它们用于定位、过滤、排序和解释一条观测记录，不属于
@@ -190,4 +191,157 @@ def query_macro_observations(
             if data_rows
             else "没有找到已关联 instrument_id 的宏观记录"
         ),
+    }
+
+
+def query_related_macro_observations(
+    cursor: Any,
+    instrument_id: str,
+    links: list[dict[str, Any]],
+    dataset_resolution: dict[str, Any],
+    field_resolution: dict[str, Any],
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    frequency: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """按正式关系表查询一个工具关联的多条宏观指标。
+
+    没有日期范围时，使用窗口函数为每个 ``metric_id + source`` 保留最新一条，
+    而不是把全局 LIMIT 用在第一条指标上。这样 EURUSD 查询可以同时返回欧元区和
+    美国的指标；有日期范围时则返回范围内的全部观测，并由 ``limit`` 控制总行数。
+    """
+
+    if not instrument_id or not links:
+        raise ValueError("相关宏观查询缺少 instrument_id 或有效关系")
+    if limit < 1 or limit > 1000:
+        raise ValueError("相关宏观查询 limit 必须在 1 到 1000 之间")
+    if start_date and end_date and start_date >= end_date:
+        raise ValueError("相关宏观查询开始日期必须早于结束日期")
+    if dataset_resolution.get("status") != "resolved":
+        return {"status": "skipped", "rows": [], "reason": "数据集目录没有 resolved"}
+    if dataset_resolution.get("dataset_id") != MACRO_DATASET_ID:
+        return {"status": "unsupported_dataset", "rows": [], "reason": "宏观字段目录未确认"}
+    if dataset_resolution.get("storage_table_name") != MACRO_TABLE:
+        return {"status": "unsupported_dataset", "rows": [], "reason": "数据集未指向 macro_observations"}
+    if field_resolution.get("status") != "resolved":
+        return {"status": "skipped", "rows": [], "reason": "字段目录没有 resolved"}
+
+    field_by_name = {
+        field.get("field_name"): field for field in field_resolution.get("fields", [])
+    }
+    missing_fields = [field for field in RELATED_MACRO_FIELDS if field not in field_by_name]
+    if missing_fields:
+        return {
+            "status": "invalid",
+            "rows": [],
+            "missing_fields": missing_fields,
+            "reason": "字段目录缺少相关宏观查询所需字段",
+        }
+
+    select_columns = sql.SQL(", ").join(
+        [
+            sql.Identifier("observation", column)
+            for column in MACRO_METADATA_COLUMNS
+        ]
+        + [
+            sql.Identifier("observation", field_by_name[field]["physical_column_name"])
+            for field in RELATED_MACRO_FIELDS
+        ]
+        + [
+            sql.Identifier("link", "relationship_role"),
+        ]
+    )
+    metric_ids = [link["metric_id"] for link in links]
+    providers = [link["provider"] for link in links]
+    conditions = [
+        sql.SQL("observation.metric_id = ANY(%s)"),
+        sql.SQL("observation.source = ANY(%s)"),
+    ]
+    parameters: list[Any] = [metric_ids, providers]
+    if start_date is not None and end_date is not None:
+        conditions.extend(
+            [sql.SQL("observation.release_time >= %s"), sql.SQL("observation.release_time < %s")]
+        )
+        parameters.extend([start_date, end_date])
+    if frequency:
+        conditions.append(sql.SQL("observation.frequency = %s"))
+        parameters.append(frequency)
+
+    # 通过关系表的 metric_id + provider 关联观测，不把宏观 observation.instrument_id
+    # 当成必填条件；该列在现有数据中允许为空。
+    join_sql = sql.SQL(
+        "JOIN source.instrument_metric_link AS link "
+        "ON link.instrument_id = %s "
+        "AND link.metric_id = observation.metric_id "
+        "AND link.provider = observation.source "
+        "AND link.status = 'active'"
+    )
+    parameters.insert(0, instrument_id)
+
+    if start_date is None and end_date is None:
+        statement = sql.SQL(
+            "WITH ranked AS (SELECT {columns}, "
+            "ROW_NUMBER() OVER (PARTITION BY observation.metric_id, observation.source "
+            "ORDER BY observation.release_time DESC, observation.id DESC) AS row_number "
+            "FROM source.macro_observations AS observation {join} "
+            "WHERE {conditions}) "
+            "SELECT * FROM ranked WHERE row_number = 1 "
+            "ORDER BY release_time DESC, id DESC LIMIT %s"
+        ).format(
+            columns=select_columns,
+            join=join_sql,
+            conditions=sql.SQL(" AND ").join(conditions),
+        )
+    else:
+        statement = sql.SQL(
+            "SELECT {columns} FROM source.macro_observations AS observation {join} "
+            "WHERE {conditions} ORDER BY observation.release_time DESC, observation.id DESC LIMIT %s"
+        ).format(
+            columns=select_columns,
+            join=join_sql,
+            conditions=sql.SQL(" AND ").join(conditions),
+        )
+    parameters.append(limit)
+    cursor.execute(statement, tuple(parameters))
+    rows = cursor.fetchall()
+
+    selected_columns = list(MACRO_METADATA_COLUMNS) + list(RELATED_MACRO_FIELDS) + ["relationship_role"]
+    data_rows: list[dict[str, Any]] = []
+    for row in rows:
+        values = {
+            column: _json_value(value)
+            for column, value in zip(selected_columns, row)
+        }
+        data_rows.append(
+            {
+                # metric_id 和 relationship_role 是相关查询的业务身份，因此属于
+                # 公开 data，而不是只供内部调试的 metadata。
+                "data": {
+                    "metric_id": values["metric_id"],
+                    "relationship_role": values["relationship_role"],
+                    **{field: values[field] for field in RELATED_MACRO_FIELDS},
+                },
+                "metadata": {
+                    column: values[column]
+                    for column in MACRO_METADATA_COLUMNS
+                    if column not in {"metric_id"}
+                },
+            }
+        )
+
+    return {
+        "status": "resolved" if data_rows else "not_found",
+        "instrument_id": instrument_id,
+        "dataset_id": dataset_resolution.get("dataset_id"),
+        "storage_table_name": dataset_resolution.get("storage_table_name"),
+        "links": links,
+        "start_date": start_date.isoformat() if start_date else None,
+        "end_date": end_date.isoformat() if end_date else None,
+        "frequency": frequency,
+        "fields": field_resolution.get("fields", []),
+        "rows": data_rows,
+        "row_count": len(data_rows),
+        "reason": "已按 instrument_metric_link 返回相关宏观指标" if data_rows else "没有找到相关宏观观测",
     }

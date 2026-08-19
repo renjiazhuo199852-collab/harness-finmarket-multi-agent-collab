@@ -20,7 +20,8 @@
 服务器端的 `icbc_shared` 数据库已经由管理员完成配置并通过验收，以下内容均已存在，
 不需要在其他 Agent 项目中重复执行：
 
-- `source` Schema 和 9 张正式业务表；
+- `source` Schema 的 9 张原有正式业务表，以及新增的
+  `source.instrument_metric_link` 宏观关系表；
 - `ai_search` Schema 和 3 张检索表；
 - 全部检索文档、`halfvec(2048)` Embedding 和 HNSW 索引；
 - `source.dataset_catalog` 已登记 `INSTRUMENT_MASTER`，数据集检索文档共 8 条；
@@ -32,7 +33,8 @@
 
 ## 当前部署状态
 
-服务器上的 `icbc_shared` 数据库已经完成初始化和验收，包含 `source` 九张正式表、
+服务器上的 `icbc_shared` 数据库已经完成初始化和验收，包含 `source` 九张原有正式表和
+`instrument_metric_link` 关系表、
 `ai_search` 三张检索表、Embedding 数据和 HNSW 索引。日常使用不需要重新建表、恢复
 数据库、重建检索文档或重新生成 Embedding。
 
@@ -144,6 +146,18 @@ dataset_catalog
   -> source.news_articles
 ```
 
+相关宏观查询使用正式关系表，不能把外汇工具 ID 直接当作宏观指标 ID：
+
+```text
+EURUSD
+  -> source.instrument_master 确认 FX_EURUSD 为 active
+  -> source.instrument_metric_link 取得欧元区和美国 METRIC 关系
+  -> 使用 metric_id + source 查询 source.macro_observations
+```
+
+服务器已登记 16 条 EURUSD 关系：欧元区 5 条 `base_currency`、美国 11 条
+`quote_currency`。首期只支持 `METRIC`，不会把 `INTEREST_RATE` 或 `BOND_YIELD` 混入结果。
+
 ## 三、返回协议
 
 正式 Python 和 HTTP 工具都只返回业务结果：
@@ -179,6 +193,8 @@ dataset_catalog
 
 常见错误码包括：`DATASET_NOT_FOUND`、`DATASET_INTENT_MISMATCH`、
 `DATASET_CANDIDATE_INVALID`、`DATASET_PROVIDER_MISMATCH`、`ADAPTER_NOT_REGISTERED`、
+`MACRO_RELATION_NOT_FOUND`、`MACRO_RELATION_PROVIDER_MISMATCH`、
+`MACRO_METRIC_NOT_FOUND`、`MACRO_RELATION_INACTIVE`、`MACRO_FIELD_RESOLUTION_FAILED`、
 `TOOL_NOT_FOUND` 和 `SERVICE_ERROR`。
 
 ## 四、配置和密钥
@@ -236,12 +252,12 @@ AI_SEARCH_DB_PASSWORD
 
 `database/full_database.sql` 是从服务器当前 `icbc_shared` 导出的备份快照，包含：
 
-- `source` Schema 和九张正式业务表；
+- `source` Schema 的 9 张原有正式业务表和 `instrument_metric_link` 关系表；
 - `ai_search` Schema 和三张 AI 检索文档表；
 - 全部数据、`halfvec(2048)` Embedding、HNSW 索引、约束和序列；
 - `pg_trgm`、`vector` 扩展创建语句。
 
-服务器数据库已经配置完成，正常启动时**不要**执行数据库恢复、创建表、重建检索文档
+服务器数据库已经配置完成，正常启动时**不要**执行数据库恢复、创建表、执行关系迁移、重建检索文档
 或重新生成 Embedding。快照仅用于灾备、迁移到另一台数据库或管理员明确批准的恢复操作。
 
 本次 Embedding 模型切换或模型重新部署时，才执行全量向量重建。执行前应停止后端，
@@ -267,7 +283,9 @@ cd D:\python\projects\ICBC-trading\tools
 .\scripts\restore_database.ps1 -AllowExistingServerDatabase
 ```
 
-数据库备份和恢复边界见 [`database/README.md`](database/README.md)。恢复后才需要运行：
+数据库备份和恢复边界见 [`database/README.md`](database/README.md)。关系迁移
+`sql/004_create_instrument_metric_link.sql` 已在服务器执行完成，日常启动不需要重复执行。
+仅在恢复到另一台空数据库后，按 003、004 的顺序执行迁移。恢复后才需要运行：
 
 ```powershell
 python .\scripts\check_config.py

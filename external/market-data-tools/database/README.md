@@ -2,7 +2,8 @@
 
 `full_database.sql` 是服务器基础数据库的备份快照，包含：
 
-- `source` Schema 的九张正式业务表和全部数据；
+- `source` Schema 的九张原有正式业务表和新增的
+  `instrument_metric_link` 关系表；
 - `ai_search` Schema 的三张检索文档表和全部 Embedding；
 - `halfvec(2048)` 向量列和三套 HNSW `halfvec_cosine_ops` 索引；
 - 当前向量模型为 SiliconFlow `Qwen/Qwen3-Embedding-8B`，请求维度为 `2048`；
@@ -18,14 +19,20 @@
 `database/003_register_instrument_master.sql`，当前服务器已经执行完成；日常启动不需要
 再次执行该迁移文件。快照文件只用于灾备，不保证自动包含后续每一次目录增量。
 
+本次 EURUSD 相关宏观指标增量对应
+`sql/004_create_instrument_metric_link.sql`，当前服务器也已经执行完成，登记
+欧元区 5 条和美国 11 条 `METRIC` 关系。该迁移只新增关系表和关系数据，不修改原有九张
+source 业务表；日常启动不需要再次执行。
+
 ## 日常使用
 
 服务器数据库已经完成初始化和验收。正常运行 tools 时：
 
 1. 不要执行数据库恢复；
 2. 不要重新创建 Schema 或检索表；
-3. 不要重复生成 Embedding；
-4. 先建立 SSH 隧道，再让后端连接本机 `127.0.0.1:15433`。
+3. 不要执行 003、004 关系和目录迁移；
+4. 不要重复生成 Embedding；
+5. 先建立 SSH 隧道，再让后端连接本机 `127.0.0.1:15433`。
 
 ```powershell
 ssh -p 22 -L 15433:127.0.0.1:5433 root@101.35.55.7
@@ -37,6 +44,9 @@ ssh -p 22 -L 15433:127.0.0.1:5433 root@101.35.55.7
 
 只有在迁移到另一台空数据库或管理员明确批准灾备恢复时，才使用快照。恢复目标必须
 支持 PostgreSQL 16、`pg_trgm` 和 pgvector `0.8.x`，并且支持 `halfvec(2048)` 与 HNSW。
+恢复基础快照后，再按 `database/003_register_instrument_master.sql`、
+`sql/004_create_instrument_metric_link.sql` 的顺序执行增量迁移。不要把基础快照直接恢复到
+已经配置好的 `icbc_shared`，避免覆盖服务器数据。
 
 恢复脚本默认拒绝操作正式数据库 `icbc_shared`：
 

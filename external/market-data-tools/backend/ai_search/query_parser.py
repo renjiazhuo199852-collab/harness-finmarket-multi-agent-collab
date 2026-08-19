@@ -36,6 +36,7 @@ class QueryRoute(str, Enum):
 
 DEFAULT_CHAT_PATH = "/chat/completions"
 REQUEST_TIMEOUT = 90
+QUERY_RELATION_SCOPES = frozenset({"direct", "related_to_subject"})
 
 
 def _chat_endpoint() -> str:
@@ -304,6 +305,11 @@ def validate_query_understanding_result(
     request_text = _optional_text(model_result.get("request_text"), "request_text")
     query_rewrite = _optional_text(model_result.get("query_rewrite"), "query_rewrite")
     search_terms = _validate_search_terms(model_result.get("search_terms"))
+    relation_scope = model_result.get("relation_scope", "direct")
+    if relation_scope not in QUERY_RELATION_SCOPES:
+        raise ValueError(
+            "query_understanding.relation_scope 只能是 direct 或 related_to_subject"
+        )
 
     if original_query is not None:
         for field_name, field_value in (
@@ -326,6 +332,9 @@ def validate_query_understanding_result(
         "request_text": request_text,
         "query_rewrite": query_rewrite,
         "search_terms": search_terms,
+        # 这是受控的查询关系语义，不是数据集、工具或指标 ID。后续只有宏观
+        # 适配器会使用 related_to_subject，关系本身必须从正式关系表读取。
+        "relation_scope": relation_scope,
     }
 
 
@@ -355,16 +364,20 @@ def _call_query_understanding_model(query: str) -> dict[str, Any]:
 5. request_text：用户请求的业务描述，例如最新价格、日K线、宏观指标、相关新闻；
 6. query_rewrite：不改变原始意图的检索改写，可用于跨语言召回；
 7. search_terms：不超过八个的主题扩展词，只能是自然语言词组，不能是 ID、表名、列名或 SQL。
+8. relation_scope：如果用户明确询问“与某个金融工具相关的宏观指标”，返回
+   related_to_subject；普通的“查询美国 CPI”或其他直接指标查询返回 direct。
 
 重要约束：
 - subject_text、provider_text、time_expression 必须逐字来自用户原文，不能标准化或凭空补全；
 - 没有供应商时 provider_text 必须为 null，不要默认填入 LSEG；
 - 日期范围单独返回，不要把日期改写成业务数据文本；
 - query_rewrite 和 search_terms 只用于召回，不能替代正式目录或主数据确认；
+- relation_scope 只描述 direct 或 related_to_subject，不得生成任何关系表、指标 ID
+  或工具 ID；“相关”关系必须由服务端正式关系表确认；
 - 严格返回 JSON，不要返回 Markdown。
 
 返回格式：
-{"subject_text":"EURUSD","subject_search_text":"EURUSD","provider_text":null,"time_expression":"最近一个月","request_text":"相关新闻","query_rewrite":"EUR/USD euro dollar related articles","search_terms":["EUR/USD","euro dollar"],"confidence":0.99,"reason":"..."}
+{"subject_text":"EURUSD","subject_search_text":"EURUSD","provider_text":null,"time_expression":null,"request_text":"相关宏观指标","query_rewrite":"EUR/USD related macroeconomic indicators","search_terms":["EUR/USD","euro area indicators","US indicators"],"relation_scope":"related_to_subject","confidence":0.99,"reason":"..."}
 """
     request_body = {
         "model": model,
