@@ -408,18 +408,6 @@ code, pre, .topbar-center code, .run-id code { font-family: "DM Mono", ui-monosp
 }
 .swarm-card-featured-skills { min-width: 0; padding-top: 2px; }
 .swarm-card-featured-skills > span { display: block; margin-bottom: 6px; color: var(--text-faint); font-size: 9px; }
-.swarm-skill-chip { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)) !important; background: color-mix(in srgb, var(--accent) 8%, var(--surface-soft)) !important; }
-.swarm-skill-chip b, .swarm-skill-chip code { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.swarm-skill-chip b { color: var(--text); font-family: inherit; font-size: 9px; font-weight: 500; }
-.swarm-skill-chip code { margin-top: 2px; color: var(--text-faint); font-family: "DM Mono", monospace; font-size: 8px; }
-.agent-catalog-groups { display: flex; flex-direction: column; gap: 20px; }
-.agent-catalog-group + .agent-catalog-group { padding-top: 18px; border-top: 1px solid var(--border); }
-.agent-catalog-group .section-heading { margin-bottom: 12px; }
-.agent-catalog-group .section-heading h4 { margin: 0; color: var(--text-soft); font-size: 11px; }
-.agent-catalog-skill-chip { display: inline-flex !important; flex-direction: column; align-items: flex-start !important; }
-.agent-catalog-skill-chip b, .agent-catalog-skill-chip code { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-catalog-skill-chip b { color: var(--text); font-family: inherit; font-size: 9px; font-weight: 500; }
-.agent-catalog-skill-chip code { margin-top: 2px; color: var(--text-faint); font-family: "DM Mono", monospace; font-size: 8px; }
 .agent-catalog-section .section-heading { align-items: flex-end; }
 .agent-catalog-section .section-heading p { margin: 5px 0 0; color: var(--text-faint); font-size: 10px; line-height: 1.5; }
 .agent-catalog-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: -2px 0 15px; }

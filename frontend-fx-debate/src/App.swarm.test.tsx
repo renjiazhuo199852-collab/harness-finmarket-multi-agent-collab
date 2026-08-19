@@ -167,12 +167,19 @@ describe("Swarm catalog UI", () => {
     expect(screen.getByText("从供给与需求两个方向并行开展商品研究，由周期策略智能体综合形成投资研判。")).toBeTruthy();
     expect(screen.getByText("专业智能体")).toBeTruthy();
     expect(screen.getByText("共 7 个智能体")).toBeTruthy();
+    expect(screen.queryByText("项目核心智能体")).toBeNull();
+    expect(screen.queryByText("其他专业智能体")).toBeNull();
+    expect(container.querySelectorAll(".agent-catalog-grid")).toHaveLength(1);
+    expect(Array.from(container.querySelectorAll(".agent-catalog-card .agent-catalog-title span")).slice(0, 5).map((node) => node.textContent)).toEqual([
+      "pair_bull", "pair_bear", "macro_technical", "fx_risk_officer", "debate_judge",
+    ]);
     expect(screen.queryByText("智能体团队")).toBeNull();
     expect(screen.getAllByText("所属团队")).toHaveLength(7);
     expect(screen.getAllByText("主要职责")).toHaveLength(7);
     expect(screen.getAllByText("货币对多头分析师")).toHaveLength(1);
     expect(screen.getAllByText("get_fx_evidence_manifest").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("外汇假设证伪").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("fx-hypothesis-falsification").length).toBeGreaterThan(0);
+    expect(screen.queryByText("外汇假设证伪")).toBeNull();
     expect(screen.getAllByText("5 个智能体").length).toBeGreaterThan(0);
     expect(screen.getAllByText("输入：研究标的 · 时间周期 · 研究目标").length).toBeGreaterThan(0);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain("/swarm/presets/fx_pair_debate_desk_smoke");
