@@ -8,13 +8,18 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import time
 from pathlib import Path
 from typing import Any
 
 from src.agent.tools import BaseTool
+from src.fx_debate.router import (
+    FX_DEBATE_PRESET,
+    FX_DEBATE_PRESET_ALIASES,
+    FxRouteDecision,
+    route_fx_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -443,6 +448,8 @@ def _normalize_preset_name(value: str) -> str | None:
     user preset is reachable only by naming it, never by keyword match.
     """
     normalized = re.sub(r"[\s-]+", "_", value.strip().lower())
+    if normalized in FX_DEBATE_PRESET_ALIASES:
+        return FX_DEBATE_PRESET
     if normalized in _PRESET_NAMES:
         return normalized
     from src.swarm.presets import resolve_preset_path
@@ -613,6 +620,64 @@ def _snippet(prompt: str, max_len: int = 240) -> str:
     return s if len(s) <= max_len else s[: max_len - 3] + "..."
 
 
+def _format_fx_route_error(decision: FxRouteDecision) -> str:
+    """Return a stable tool response for deterministic FX route failures."""
+    return json.dumps(
+        {
+            "status": "error",
+            "route": "fx_debate",
+            "code": decision.reason_code or "FX_ROUTE_INVALID",
+            "message": decision.message or "FX Debate 请求无法解析。",
+        },
+        ensure_ascii=False,
+    )
+
+
+def _execute_fx_debate_request(
+    decision: FxRouteDecision,
+    *,
+    event_callback: Any | None,
+) -> str:
+    """Delegate a resolved natural-language request to the canonical FX tool."""
+    assert decision.request is not None
+    from src.tools.run_fx_debate_tool import (
+        RunFxDebateTool,
+        adapt_fx_debate_event_callback,
+    )
+
+    try:
+        if not RunFxDebateTool.check_available():
+            return json.dumps(
+                {
+                    "status": "error",
+                    "route": "fx_debate",
+                    "code": "FX_DATA_UNAVAILABLE",
+                    "message": "FX 数据源未配置，无法启动 Debate。",
+                },
+                ensure_ascii=False,
+            )
+    except Exception as exc:  # noqa: BLE001 - stable routing boundary
+        logger.warning("FX data-source availability check failed", exc_info=True)
+        return json.dumps(
+            {
+                "status": "error",
+                "route": "fx_debate",
+                "code": "FX_DATA_UNAVAILABLE",
+                "message": f"FX 数据源不可用：{exc}",
+            },
+            ensure_ascii=False,
+        )
+
+    tool = RunFxDebateTool(
+        event_callback=adapt_fx_debate_event_callback(event_callback),
+    )
+    return tool.execute(
+        target=decision.request.target,
+        timeframe=decision.request.timeframe,
+        goal=decision.request.goal,
+    )
+
+
 def _build_variables(preset_name: str, prompt: str) -> dict[str, str]:
     """Build template variables from prompt for the matched preset.
 
@@ -678,6 +743,8 @@ class SwarmTool(BaseTool):
         "Provide a natural language prompt and, when known, an explicit preset_name from agent/src/swarm/presets "
         "(e.g. equity_research_team, quant_strategy_desk, global_allocation_committee, risk_committee) "
         "so follow-up/continuation prompts do not lose routing context. "
+        "FX directional/debate prompts are deterministically routed to the canonical run_fx_debate tool. "
+        "The legacy alias fx_pair_debate_desk_3vars_v1 maps to fx_debate_team. "
         "Example: run_swarm(prompt='Analyze A-share new energy opportunities for Q2 2026', preset_name='equity_research_team')"
     )
     parameters = {
@@ -739,7 +806,25 @@ class SwarmTool(BaseTool):
                 ensure_ascii=False,
             )
 
-        preset, preset_error = _resolve_preset(prompt, kwargs.get("preset_name"))
+        explicit_preset = kwargs.get("preset_name")
+        fx_decision = route_fx_prompt(
+            prompt,
+            explicit_preset=explicit_preset if isinstance(explicit_preset, str) else None,
+        )
+        if fx_decision.route == "clarify":
+            return _format_fx_route_error(fx_decision)
+        if fx_decision.route == "fx_debate":
+            logger.info(
+                "SwarmTool: routed natural-language request to FX Debate: target=%s timeframe=%s",
+                fx_decision.request.target if fx_decision.request else None,
+                fx_decision.request.timeframe if fx_decision.request else None,
+            )
+            return _execute_fx_debate_request(
+                fx_decision,
+                event_callback=self._event_callback,
+            )
+
+        preset, preset_error = _resolve_preset(prompt, explicit_preset)
         if preset_error:
             return json.dumps(
                 {"status": "error", "error": preset_error},

@@ -70,3 +70,15 @@ def test_run_with_agent_keeps_event_loop_responsive_during_registry_build(
     assert result["status"] == "completed"
     assert tick_times, "Expected the event loop ticker to run while registry build was pending"
     assert tick_times[0] < 0.18, f"Registry build blocked the event loop for too long: {tick_times[0]:.3f}s"
+
+
+def test_cancel_current_records_attempt_before_agent_loop_is_ready(tmp_path: Path) -> None:
+    service = SessionService(
+        store=SessionStore(tmp_path / "sessions"),
+        event_bus=EventBus(),
+        runs_dir=tmp_path / "runs",
+    )
+    service._active_attempts["session-1"] = "attempt-1"
+
+    assert service.cancel_current("session-1") is True
+    assert "attempt-1" in service._cancelled_attempts

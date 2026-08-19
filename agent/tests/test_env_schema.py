@@ -30,6 +30,7 @@ from src.config.env_schema import (
     AgentTuningConfig,
     DataConfig,
     EnvConfig,
+    FxDebateDataConfig,
     LLMConfig,
     MarketDatabaseConfig,
     PathConfig,
@@ -48,6 +49,7 @@ for _model in (
     LLMConfig,
     DataConfig,
     MarketDatabaseConfig,
+    FxDebateDataConfig,
     APIConfig,
     SwarmConfig,
     AgentTuningConfig,
@@ -84,9 +86,17 @@ class TestEnvConfigDefaults:
         assert c.llm.timeout_seconds == 120
         assert c.llm.max_retries == 2
         assert c.llm.langchain_reasoning_effort == ""
+        assert c.llm.langchain_wire_api == "chat_completions"
+        assert c.llm.openai_disable_response_storage is True
+        assert c.llm.openai_responses_http_headers == "{}"
+        assert c.llm.openai_responses_text_verbosity == "medium"
+        assert c.llm.openai_responses_reasoning_context == "auto"
         assert c.llm.vibe_trading_deepseek_adapter == "auto"
         assert c.llm.moonshot_user_agent == ""
-        assert c.llm.openai_codex_base_url == "https://chatgpt.com/backend-api/codex/responses"
+        assert (
+            c.llm.openai_codex_base_url
+            == "https://chatgpt.com/backend-api/codex/responses"
+        )
 
     def test_data_defaults(self) -> None:
         c = EnvConfig()
@@ -119,6 +129,11 @@ class TestEnvConfigDefaults:
         assert c.market_database.user == ""
         assert c.market_database.password == ""
         assert c.market_database.is_configured() is False
+
+    def test_fx_debate_data_defaults(self) -> None:
+        c = EnvConfig()
+        assert c.fx_debate.data_source == "database"
+        assert c.fx_debate.excel_path == ""
 
     def test_api_defaults(self) -> None:
         c = EnvConfig()
@@ -189,12 +204,16 @@ class TestEnvConfigTypeCoercion:
         assert c.llm.langchain_temperature == 0.5
         assert isinstance(c.llm.langchain_temperature, float)
 
-    def test_invalid_int_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_invalid_int_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("TIMEOUT_SECONDS", "not_a_number")
         c = EnvConfig()
         assert c.llm.timeout_seconds == 120
 
-    def test_invalid_token_threshold_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_invalid_token_threshold_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("TOKEN_THRESHOLD", "abc")
         c = EnvConfig()
         assert c.agent_tuning.token_threshold == 40000
@@ -252,9 +271,18 @@ class TestEnvConfigOverride:
         assert database.port == 15433
         assert database.user == "icbc_collab"
 
-    def test_env_override_and_reset(
+    def test_fx_debate_excel_source_reads_from_environment(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setenv("FX_DEBATE_DATA_SOURCE", "excel")
+        monkeypatch.setenv("FX_DEBATE_EXCEL_PATH", "/tmp/fx-demo.xlsx")
+
+        config = EnvConfig().fx_debate
+
+        assert config.data_source == "excel"
+        assert config.excel_path == "/tmp/fx-demo.xlsx"
+
+    def test_env_override_and_reset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("LANGCHAIN_PROVIDER", "deepseek")
         monkeypatch.setenv("TIMEOUT_SECONDS", "60")
         monkeypatch.setenv("TUSHARE_TOKEN", "test_token_123")
@@ -337,9 +365,7 @@ class TestSingletonBehavior:
         c3 = get_env_config()
         assert c3 is not c1
 
-    def test_reset_picks_up_new_env(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_reset_picks_up_new_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         c1 = get_env_config()
         assert c1.llm.timeout_seconds == 120
 
@@ -412,10 +438,20 @@ class TestParseBool:
     @pytest.mark.parametrize(
         "value",
         [
-            "0", "false", "False", "FALSE",
-            "no", "No", "NO",
-            "off", "Off", "OFF",
-            "", "random", "2", "maybe",
+            "0",
+            "false",
+            "False",
+            "FALSE",
+            "no",
+            "No",
+            "NO",
+            "off",
+            "Off",
+            "OFF",
+            "",
+            "random",
+            "2",
+            "maybe",
         ],
     )
     def test_falsy(self, value: str) -> None:
@@ -483,7 +519,9 @@ class TestGetEnvOr:
         monkeypatch.delenv("FALLBACK", raising=False)
         assert get_env_or("PRIMARY", "FALLBACK", "default") == "default"
 
-    def test_empty_primary_falls_to_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_empty_primary_falls_to_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("PRIMARY", "")
         monkeypatch.setenv("FALLBACK", "fb")
         assert get_env_or("PRIMARY", "FALLBACK", "default") == "fb"

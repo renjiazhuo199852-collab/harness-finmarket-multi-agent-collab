@@ -148,6 +148,10 @@ class Attempt:
     status: AttemptStatus = AttemptStatus.PENDING
     prompt: str = ""
     run_dir: Optional[str] = None
+    # Canonical Swarm run id when this attempt launches a Swarm tool.  This is
+    # separate from ``run_dir`` because AgentLoop owns a generic run directory
+    # while FX Debate owns the user-visible ``swarm-*`` identity.
+    swarm_run_id: Optional[str] = None
     summary: Optional[str] = None
     react_trace: List[Dict[str, Any]] = field(default_factory=list)
     created_at: str = field(default_factory=_utc_now_iso)
@@ -205,3 +209,10 @@ class Attempt:
         self.status = AttemptStatus.FAILED
         self.completed_at = _utc_now_iso()
         self.error = error
+
+    def mark_cancelled(self, summary: Optional[str] = None) -> None:
+        """Mark the attempt as cancelled without treating it as an error."""
+        self.status = AttemptStatus.CANCELLED
+        self.completed_at = _utc_now_iso()
+        if summary:
+            self.summary = summary

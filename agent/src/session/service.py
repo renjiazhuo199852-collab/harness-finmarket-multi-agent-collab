@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -51,6 +52,8 @@ class SessionService:
         self.event_bus = event_bus
         self.runs_dir = runs_dir
         self._active_loops: Dict[str, "AgentLoop"] = {}
+        self._active_attempts: Dict[str, str] = {}
+        self._cancelled_attempts: set[str] = set()
         self._search_index = get_shared_index()
 
     def create_session(self, title: str = "", config: Optional[Dict[str, Any]] = None) -> Session:
@@ -119,6 +122,7 @@ class SessionService:
         session.last_attempt_id = attempt.attempt_id
         session.updated_at = datetime.now().isoformat()
         self.store.update_session(session)
+        self._active_attempts[session_id] = attempt.attempt_id
         self.event_bus.emit(session_id, "attempt.created", {"attempt_id": attempt.attempt_id, "prompt": content})
 
         asyncio.create_task(self._run_attempt(session, attempt, include_shell_tools=include_shell_tools))
@@ -129,18 +133,22 @@ class SessionService:
         return self.store.get_messages(session_id, limit)
 
     def cancel_current(self, session_id: str) -> bool:
-        """Cancel the currently running AgentLoop for a session.
+        """Cancel the current attempt for a session.
 
         Args:
             session_id: Session ID.
 
         Returns:
-            Whether cancellation succeeded. True means an active loop existed and received a cancel signal.
+            Whether cancellation was recorded. This also covers the short
+            window before the AgentLoop has finished building its registry.
         """
+        attempt_id = self._active_attempts.get(session_id)
         loop = self._active_loops.get(session_id)
-        if loop is None:
+        if attempt_id is None:
             return False
-        loop.cancel()
+        self._cancelled_attempts.add(attempt_id)
+        if loop is not None:
+            loop.cancel()
         return True
 
     async def _run_attempt(self, session: Session, attempt: Attempt, *, include_shell_tools: bool = False) -> None:
@@ -151,22 +159,30 @@ class SessionService:
 
         try:
             messages = self.store.get_messages(session.session_id)
-            result = await self._run_with_agent(
-                attempt,
-                messages=messages,
-                include_shell_tools=include_shell_tools,
-                session_config=dict(session.config),
-            )
+            if attempt.attempt_id in self._cancelled_attempts:
+                result = {"status": "cancelled", "reason": "cancelled by user"}
+            else:
+                result = await self._run_with_agent(
+                    attempt,
+                    messages=messages,
+                    include_shell_tools=include_shell_tools,
+                    session_config=dict(session.config),
+                )
             if result.get("status") == "success":
                 attempt.mark_completed(summary=result.get("content", ""))
+            elif result.get("status") == "cancelled":
+                attempt.mark_cancelled(summary=result.get("reason", "cancelled by user"))
             else:
                 attempt.mark_failed(error=result.get("reason", "unknown"))
             attempt.run_dir = result.get("run_dir")
+            attempt.swarm_run_id = result.get("swarm_run_id") or attempt.swarm_run_id
 
             self.store.update_attempt(attempt)
             reply_metadata = {}
             if attempt.run_dir:
                 reply_metadata["run_id"] = Path(attempt.run_dir).name
+            if attempt.swarm_run_id:
+                reply_metadata["swarm_run_id"] = attempt.swarm_run_id
             reply_metadata["status"] = attempt.status.value
             if attempt.metrics:
                 reply_metadata["metrics"] = attempt.metrics
@@ -190,6 +206,13 @@ class SessionService:
             attempt.mark_failed(error=str(exc))
             self.store.update_attempt(attempt)
             self.event_bus.emit(session.session_id, "attempt.failed", {"attempt_id": attempt.attempt_id, "error": str(exc)})
+        finally:
+            # The early-cancel path can finish before _run_with_agent installs
+            # its inner cleanup block. Keep the per-attempt cancellation state
+            # bounded and do not disturb a newer attempt in this session.
+            if self._active_attempts.get(session.session_id) == attempt.attempt_id:
+                self._active_attempts.pop(session.session_id, None)
+            self._cancelled_attempts.discard(attempt.attempt_id)
 
     async def _run_with_agent(
         self,
@@ -232,11 +255,35 @@ class SessionService:
         def event_callback(event_type: str, data: Dict[str, Any]) -> None:
             """Forward AgentLoop events to the SSE event bus."""
             data["attempt_id"] = attempt_id
+            if event_type == "swarm.started":
+                run_id = data.get("run_id")
+                if isinstance(run_id, str) and run_id:
+                    attempt.swarm_run_id = run_id
+                    self.store.update_attempt(attempt)
+            # ``tool_result`` deliberately carries a bounded preview on SSE.
+            # FX Debate places its canonical swarm id near the beginning of
+            # that JSON preview, so capture it at the attempt boundary while
+            # preserving the existing event contract.
+            if event_type == "tool_result" and data.get("tool") in {"run_fx_debate", "swarm"}:
+                preview = data.get("preview")
+                if isinstance(preview, str):
+                    match = re.search(r'"run_id"\s*:\s*"(swarm-[^"]+)"', preview)
+                    if match:
+                        attempt.swarm_run_id = match.group(1)
+                        self.store.update_attempt(attempt)
             self.event_bus.emit(session_id, event_type, data)
 
         def _mcp_collision_warn(msg: str) -> None:
             """Forward MCP server-name collision warnings to the operator event channel."""
             self.event_bus.emit(session_id, "mcp.warning", {"attempt_id": attempt_id, "message": msg})
+
+        agent_ref: list[AgentLoop | None] = [None]
+
+        def cancel_checker() -> bool:
+            current = agent_ref[0]
+            return attempt_id in self._cancelled_attempts or (
+                current.is_cancelled() if current is not None else False
+            )
 
         registry = await loop.run_in_executor(
             _AGENT_EXECUTOR,
@@ -246,6 +293,7 @@ class SessionService:
                 agent_config=agent_config,
                 session_id=session_id,
                 event_callback=event_callback,
+                cancel_checker=cancel_checker,
                 warn_callback=_mcp_collision_warn,
             ),
         )
@@ -257,7 +305,10 @@ class SessionService:
             max_iterations=50,
             persistent_memory=pm,
         )
+        agent_ref[0] = agent
         self._active_loops[session_id] = agent
+        if attempt_id in self._cancelled_attempts:
+            agent.cancel()
 
         # Build the message history context.
         history = self._convert_messages_to_history(messages) if messages else None
@@ -272,7 +323,14 @@ class SessionService:
                 ),
             )
         finally:
-            self._active_loops.pop(session_id, None)
+            # A cancelled attempt may overlap a newly submitted attempt after
+            # the UI is unlocked. Do not remove the newer loop's cancellation
+            # handle when the older executor finishes.
+            if self._active_loops.get(session_id) is agent:
+                self._active_loops.pop(session_id, None)
+            if self._active_attempts.get(session_id) == attempt_id:
+                self._active_attempts.pop(session_id, None)
+            self._cancelled_attempts.discard(attempt_id)
 
         # Load metrics from the run output when available.
         if result.get("run_dir"):

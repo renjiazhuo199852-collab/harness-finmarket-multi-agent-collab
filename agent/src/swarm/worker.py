@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ from src.agent.progress import HeartbeatTimer
 from src.agent.skills import SkillsLoader
 from src.agent.tools import ToolRegistry
 from src.config.schema import AgentConfig
+from src.observability import observation_scope
 from src.providers.chat import ChatLLM, LLMResponse, ProviderStreamError
 from src.providers.content_filter import (
     CONTENT_FILTER_SKIP_MESSAGE,
@@ -36,13 +38,22 @@ from src.tools.redaction import is_sensitive_arg, redact_payload
 
 logger = logging.getLogger(__name__)
 
+_JSON_FENCE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_MACHINE_HEADING = re.compile(
+    r"##\s*Machine-readable\s+V2\s*(.*?)(?=\n##\s|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
 def _default_max_iterations() -> int:
     from src.config.accessor import get_env_config
+
     return get_env_config().swarm.swarm_worker_max_iter
 
 
 def _default_timeout_seconds() -> int:
     from src.config.accessor import get_env_config
+
     return get_env_config().swarm.swarm_worker_timeout
 
 
@@ -112,13 +123,13 @@ def _filter_skill_descriptions(loader: SkillsLoader, skill_names: list[str]) -> 
 
     Args:
         loader: SkillsLoader instance with all skills loaded.
-        skill_names: Skill names to include. Empty list means include all.
+        skill_names: Explicitly assigned Skill names. Empty means none.
 
     Returns:
         Formatted skill descriptions string.
     """
     if not skill_names:
-        return loader.get_descriptions()
+        return "(no matching skills)"
     lines: list[str] = []
     for skill in loader.skills:
         if skill.name in skill_names:
@@ -204,15 +215,23 @@ def build_worker_prompt(
         sections = []
         for key, summary in upstream_summaries.items():
             sections.append(f"### {key}\n{summary}")
-        upstream_block = (
-            "## Upstream Context (from previous agents)\n\n"
-            + "\n\n".join(sections)
+        upstream_block = "## Upstream Context (from previous agents)\n\n" + "\n\n".join(
+            sections
         )
 
+    has_upstream_slot = "{upstream_context}" in agent_spec.system_prompt
     prompt_parts = [
         f"## Role\n\n{agent_spec.role}",
         agent_spec.system_prompt.replace("{upstream_context}", upstream_block),
     ]
+
+    # Presets historically had to remember a magic placeholder.  Runtime
+    # already resolved ``input_from`` safely, so silently dropping a populated
+    # upstream mapping is always wrong and can make a risk/judge agent invent
+    # "missing upstream" conclusions.  Keep explicit placement when supplied,
+    # otherwise append the block as a fail-safe.
+    if upstream_block and not has_upstream_slot:
+        prompt_parts.append(upstream_block)
 
     if skill_descriptions and skill_descriptions != "(no matching skills)":
         prompt_parts.append(
@@ -258,30 +277,58 @@ def build_worker_prompt(
         "If you cannot back a number with (a), (b), or (c), you have two "
         "choices:\n"
         "  - call a data tool to fetch it (preferred), or\n"
-        "  - omit the number and qualify the statement (e.g. \"directional "
-        "only — not verified against live data\").\n\n"
+        '  - omit the number and qualify the statement (e.g. "directional '
+        'only — not verified against live data").\n\n'
         "This rule applies equally to synthesis / aggregator / editor roles "
         "that lack data tools. If upstream did not provide a specific number, "
         "do NOT introduce one from training data — say the upstream omitted "
         "it and proceed without."
     )
 
+    available_tools = set(agent_spec.tools or [])
+    execute_rules = [
+        "- Use only the tools in your assigned whitelist and preserve their returned identifiers."
+    ]
+    if "load_skill" in available_tools:
+        execute_rules.append(
+            "- `load_skill` first to get data access methods and analysis patterns."
+        )
+    if {"write_file", "bash"}.issubset(available_tools):
+        execute_rules.extend(
+            [
+                "- Write ONE focused Python script via `write_file`, then run it with `bash python script.py`.",
+                "- Do NOT write long Python code inside bash. Use write_file + bash.",
+                "- Do NOT fetch data with curl/requests. Use the approved data access tools.",
+            ]
+        )
+    if "edit_file" in available_tools and "bash" in available_tools:
+        execute_rules.append(
+            "- If a script fails, fix it with `edit_file` and retry at most twice."
+        )
+
+    if "write_file" in available_tools:
+        summarize_rules = (
+            "**Phase 3 — Summarize (MUST use write_file):**\n"
+            "- You MUST call `write_file` with path `report.md` to save your final report.\n"
+            "- This is REQUIRED; your final response must include that write_file call.\n"
+            "- After writing report.md, output a brief 2-3 sentence summary.\n"
+            "- Respond in the same language as the task prompt."
+        )
+    else:
+        summarize_rules = (
+            "**Phase 3 — Summarize:**\n"
+            "- Return the complete deliverable in your final response.\n"
+            "- Respond in the same language as the task prompt."
+        )
+
     prompt_parts.append(
         "## Execution Rules\n\n"
         "You have a HARD LIMIT of 20 tool calls. After that you will be cut off. Work efficiently.\n\n"
         "**Phase 1 — Plan (0 tool calls):** Before calling any tool, state your plan in 3-5 bullet points.\n\n"
         "**Phase 2 — Execute (≤15 tool calls):**\n"
-        "- `load_skill` first to get data access methods and analysis patterns.\n"
-        "- Write ONE focused Python script via `write_file`, then run it with `bash python script.py`.\n"
-        "- Do NOT write long Python code inside bash. Use write_file + bash.\n"
-        "- Do NOT fetch data with curl/requests. Use the patterns from load_skill (yfinance, OKX API via Python).\n"
-        "- If a script fails, read the error, fix with `edit_file`, re-run. Max 2 retries per script.\n\n"
-        "**Phase 3 — Summarize (MUST use write_file):**\n"
-        "- You MUST call `write_file` with path `report.md` to save your final report as a markdown file.\n"
-        "- This is REQUIRED, not optional. Your final response MUST include a write_file call for report.md.\n"
-        "- The report must include specific numbers, dates, and actionable conclusions.\n"
-        "- After writing report.md, output a brief 2-3 sentence summary in your text response.\n"
-        "- Respond in the same language as the task prompt."
+        + "\n".join(execute_rules)
+        + "\n\n"
+        + summarize_rules
     )
 
     now = datetime.now(timezone.utc)
@@ -339,8 +386,7 @@ def run_worker(
     task_id = task.id
     max_iterations = agent_spec.max_iterations or _default_max_iterations()
     timeout = agent_spec.timeout_seconds or _default_timeout_seconds()
-
-    _emit(event_callback, "worker_started", agent_id, task_id)
+    available_tools = set(agent_spec.tools or [])
 
     # 1. Build per-worker tool registry — local pool plus any operator-
     #    surfaced MCP tools, projected onto the agent's whitelist.
@@ -355,14 +401,27 @@ def run_worker(
 
     # 3. Build system prompt with filtered skills
     skills_loader = SkillsLoader()
+    if "load_skill" in (agent_spec.tools or []):
+        from src.tools.load_skill_tool import LoadSkillTool
+
+        registry.register(
+            LoadSkillTool(
+                skills_loader=skills_loader,
+                allowed_names=set(agent_spec.skills),
+            )
+        )
     skill_desc = _filter_skill_descriptions(skills_loader, agent_spec.skills)
     system_prompt = build_worker_prompt(
-        agent_spec, upstream_summaries, skill_desc, grounding_block=grounding_block,
+        agent_spec,
+        upstream_summaries,
+        skill_desc,
+        grounding_block=grounding_block,
     )
 
     # 4. Resolve prompt template with user vars (missing vars → LLM infers)
     class _FallbackDict(dict):
         """Dict that hints LLM to infer missing template variables."""
+
         def __missing__(self, key: str) -> str:
             return f"(determine the appropriate {key} based on the objective)"
 
@@ -374,8 +433,12 @@ def run_worker(
         error_msg = f"Failed to render prompt template: {exc}"
         _emit(event_callback, "worker_failed", agent_id, task_id, {"error": error_msg})
         return WorkerResult(
-            status="failed", summary="", iterations=0, error=error_msg,
-            input_tokens=0, output_tokens=0,
+            status="failed",
+            summary="",
+            iterations=0,
+            error=error_msg,
+            input_tokens=0,
+            output_tokens=0,
         )
 
     # 5. Build initial messages
@@ -383,6 +446,21 @@ def run_worker(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+    _emit(
+        event_callback,
+        "worker_started",
+        agent_id,
+        task_id,
+        {
+            "input": {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "upstream_summaries": redact_payload(upstream_summaries),
+            },
+            "tools": list(agent_spec.tools or []),
+            "model": agent_spec.model_name or "default",
+        },
+    )
 
     # 6. ReAct loop
     artifact_dir = run_dir / "artifacts" / agent_id
@@ -400,6 +478,8 @@ def run_worker(
 
     _KEEP_RECENT_TOOLS = 3
     data_tool_calls = 0
+    validated_output: dict[str, Any] | None = None
+    last_validation_errors: list[dict[str, Any]] = []
     content_filter_count = 0
     consecutive_content_filter_count = 0
 
@@ -415,9 +495,18 @@ def run_worker(
         # Check timeout
         elapsed = time.monotonic() - t0
         if elapsed > timeout:
-            summary = _best_summary(messages, last_assistant_content) or f"Worker timed out after {elapsed:.0f}s ({iteration} iterations)"
+            summary = (
+                _best_summary(messages, last_assistant_content)
+                or f"Worker timed out after {elapsed:.0f}s ({iteration} iterations)"
+            )
             summary = _resolve_summary(artifact_dir, summary)
-            _emit(event_callback, "worker_timeout", agent_id, task_id, {"elapsed": elapsed})
+            _emit(
+                event_callback,
+                "worker_timeout",
+                agent_id,
+                task_id,
+                {"elapsed": elapsed},
+            )
             _write_summary(artifact_dir, summary)
             _persist_messages(artifact_dir, messages)
             return WorkerResult(
@@ -428,16 +517,26 @@ def run_worker(
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
                 content_filter_warnings=compute_content_filter_warnings(
-                    content_filter_count, iteration + 1,
+                    content_filter_count,
+                    iteration + 1,
                 ),
             )
 
         # Check token estimate
         token_estimate = len(json.dumps(messages, ensure_ascii=False)) // 4
         if token_estimate > _MAX_TOKEN_ESTIMATE:
-            summary = last_assistant_content or f"Worker context too large (~{token_estimate} tokens, {iteration} iterations)"
+            summary = (
+                last_assistant_content
+                or f"Worker context too large (~{token_estimate} tokens, {iteration} iterations)"
+            )
             summary = _resolve_summary(artifact_dir, summary)
-            _emit(event_callback, "worker_token_limit", agent_id, task_id, {"tokens": token_estimate})
+            _emit(
+                event_callback,
+                "worker_token_limit",
+                agent_id,
+                task_id,
+                {"tokens": token_estimate},
+            )
             _write_summary(artifact_dir, summary)
             return WorkerResult(
                 status="token_limit",
@@ -447,21 +546,24 @@ def run_worker(
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
                 content_filter_warnings=compute_content_filter_warnings(
-                    content_filter_count, iteration + 1,
+                    content_filter_count,
+                    iteration + 1,
                 ),
             )
 
         # Inject wrap-up nudge when approaching iteration limit
         if iteration == wrap_up_at:
             remaining = max_iterations - iteration
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"[SYSTEM] You have {remaining} iterations remaining. "
-                    "If report.md is not written yet, make one final write_file call for report.md. "
-                    "Otherwise stop calling tools and output your final analysis summary as plain text."
-                ),
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"[SYSTEM] You have {remaining} iterations remaining. "
+                        "If report.md is not written yet, make one final write_file call for report.md. "
+                        "Otherwise stop calling tools and output your final analysis summary as plain text."
+                    ),
+                }
+            )
 
         # On last iteration, call LLM without tool definitions to force text output
         is_last_iteration = iteration == max_iterations - 1
@@ -470,9 +572,15 @@ def run_worker(
         # Stream the LLM — moonshot/kimi non-streaming invoke is unreliable
         # (issue #42), and streaming also feeds dashboard live progress.
         try:
+
             def _on_text_chunk(delta: str) -> None:
-                _emit(event_callback, "worker_text", agent_id, task_id,
-                      {"content": delta, "iteration": iteration})
+                _emit(
+                    event_callback,
+                    "worker_text",
+                    agent_id,
+                    task_id,
+                    {"content": delta, "iteration": iteration},
+                )
 
             # LLM streaming can stall for 30s+ between request start and the
             # first text chunk (slow first-token providers, reasoning models'
@@ -542,7 +650,51 @@ def run_worker(
         except Exception as exc:
             error_msg = f"LLM call failed at iteration {iteration}: {exc}"
             logger.warning(error_msg)
-            _emit(event_callback, "worker_failed", agent_id, task_id, {"error": error_msg})
+            # A transient provider disconnect can happen after an FX Agent has
+            # already validated and persisted its report.  In that case the
+            # report is the deterministic deliverable; asking the provider for
+            # one more prose summary must not erase a valid result.
+            if "validate_fx_output" in available_tools and validated_output is not None:
+                _canonicalize_fx_report(artifact_dir, validated_output)
+                validation_issue = _fx_validation_issue(
+                    artifact_dir, validated_output, last_validation_errors
+                )
+                if validation_issue is None:
+                    summary = _resolve_summary(
+                        artifact_dir,
+                        last_assistant_content or "FX report validated and persisted.",
+                    )
+                    _write_summary(artifact_dir, summary)
+                    _emit(
+                        event_callback,
+                        "worker_completed",
+                        agent_id,
+                        task_id,
+                        {
+                            "iterations": iteration,
+                            "output": summary,
+                            "degraded": True,
+                            "reason": "validated FX report preserved after provider disconnect",
+                            "input_tokens": total_input_tokens,
+                            "output_tokens": total_output_tokens,
+                        },
+                    )
+                    return WorkerResult(
+                        status="completed",
+                        summary=summary,
+                        artifact_paths=_collect_artifacts(artifact_dir),
+                        iterations=iteration,
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        error=error_msg,
+                        content_filter_warnings=compute_content_filter_warnings(
+                            content_filter_count,
+                            iteration + 1,
+                        ),
+                    )
+            _emit(
+                event_callback, "worker_failed", agent_id, task_id, {"error": error_msg}
+            )
             return WorkerResult(
                 status="failed",
                 summary=_resolve_summary(artifact_dir, last_assistant_content or ""),
@@ -552,7 +704,8 @@ def run_worker(
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
                 content_filter_warnings=compute_content_filter_warnings(
-                    content_filter_count, iteration + 1,
+                    content_filter_count,
+                    iteration + 1,
                 ),
             )
 
@@ -593,7 +746,8 @@ def run_worker(
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
                     content_filter_warnings=compute_content_filter_warnings(
-                        content_filter_count, iteration + 1,
+                        content_filter_count,
+                        iteration + 1,
                     ),
                 )
             _emit(
@@ -603,10 +757,12 @@ def run_worker(
                 task_id,
                 {"iteration": iteration, "content_filter_count": content_filter_count},
             )
-            messages.append({
-                "role": "system",
-                "content": CONTENT_FILTER_SKIP_MESSAGE,
-            })
+            messages.append(
+                {
+                    "role": "system",
+                    "content": CONTENT_FILTER_SKIP_MESSAGE,
+                }
+            )
             continue
 
         consecutive_content_filter_count = 0
@@ -622,9 +778,52 @@ def run_worker(
                 report_written=_report_written(artifact_dir),
                 data_tool_calls=data_tool_calls,
             )
+            if "validate_fx_output" in available_tools and validated_output is not None:
+                _canonicalize_fx_report(artifact_dir, validated_output)
+            validation_issue = (
+                _fx_validation_issue(
+                    artifact_dir, validated_output, last_validation_errors
+                )
+                if "validate_fx_output" in available_tools
+                else None
+            )
+            if validation_issue:
+                _emit(
+                    event_callback,
+                    "worker_failed",
+                    agent_id,
+                    task_id,
+                    _validation_failure_data(
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        iteration=iteration + 1,
+                        issue=validation_issue,
+                        validation_errors=last_validation_errors,
+                        artifact_dir=artifact_dir,
+                        validated_output_present=validated_output is not None,
+                    ),
+                )
+                return WorkerResult(
+                    status="failed",
+                    summary=summary,
+                    artifact_paths=_collect_artifacts(artifact_dir),
+                    iterations=iteration + 1,
+                    error=f"FX validation contract not met: {validation_issue}",
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    content_filter_warnings=compute_content_filter_warnings(
+                        content_filter_count,
+                        iteration + 1,
+                    ),
+                )
             if reason:
-                _emit(event_callback, "worker_incomplete", agent_id, task_id,
-                      {"iterations": iteration + 1, "reason": reason})
+                _emit(
+                    event_callback,
+                    "worker_incomplete",
+                    agent_id,
+                    task_id,
+                    {"iterations": iteration + 1, "reason": reason},
+                )
                 return WorkerResult(
                     status="incomplete",
                     summary=summary,
@@ -634,10 +833,22 @@ def run_worker(
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
                     content_filter_warnings=compute_content_filter_warnings(
-                        content_filter_count, iteration + 1,
+                        content_filter_count,
+                        iteration + 1,
                     ),
                 )
-            _emit(event_callback, "worker_completed", agent_id, task_id, {"iterations": iteration + 1})
+            _emit(
+                event_callback,
+                "worker_completed",
+                agent_id,
+                task_id,
+                {
+                    "iterations": iteration + 1,
+                    "output": summary,
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                },
+            )
             return WorkerResult(
                 status="completed",
                 summary=summary,
@@ -646,7 +857,8 @@ def run_worker(
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
                 content_filter_warnings=compute_content_filter_warnings(
-                    content_filter_count, iteration + 1,
+                    content_filter_count,
+                    iteration + 1,
                 ),
             )
 
@@ -656,6 +868,7 @@ def run_worker(
                 response.tool_calls,
                 content=response.content,
                 reasoning_content=response.reasoning_content,
+                provider_state=response.provider_state,
             )
         )
 
@@ -663,10 +876,18 @@ def run_worker(
         for tc in response.tool_calls:
             mcp_meta = _remote_tool_metadata(registry, tc.name)
             _emit(
-                event_callback, "tool_call", agent_id, task_id,
-                {"tool": tc.name, "iteration": iteration,
-                 "arguments": _preview_tool_arguments(tc.arguments),
-                 **mcp_meta},
+                event_callback,
+                "tool_call",
+                agent_id,
+                task_id,
+                {
+                    "tool": tc.name,
+                    "call_id": tc.id,
+                    "iteration": iteration,
+                    "input": redact_payload(tc.arguments),
+                    "arguments": _preview_tool_arguments(tc.arguments),
+                    **mcp_meta,
+                },
             )
             tc_start = time.monotonic()
             args = {**tc.arguments, "run_dir": str(artifact_dir)}
@@ -684,13 +905,74 @@ def run_worker(
                     {**payload, "iteration": iteration, "phase": "tool"},
                 )
 
-            with HeartbeatTimer(
-                tool_name=tc.name,
-                interval=_HEARTBEAT_INTERVAL_S,
-                emit=_on_heartbeat,
-            ):
-                result = registry.execute(tc.name, args)
+            def _on_nested_observation(event: dict[str, Any]) -> None:
+                nested_data = event.get("data")
+                _emit(
+                    event_callback,
+                    str(event.get("type") or "observation"),
+                    agent_id,
+                    task_id,
+                    {
+                        **(nested_data if isinstance(nested_data, dict) else {}),
+                        "iteration": iteration,
+                        "parent_tool": tc.name,
+                        "parent_call_id": tc.id,
+                    },
+                )
+
+            with observation_scope(_on_nested_observation):
+                with HeartbeatTimer(
+                    tool_name=tc.name,
+                    interval=_HEARTBEAT_INTERVAL_S,
+                    emit=_on_heartbeat,
+                ):
+                    result = registry.execute(tc.name, args)
             result_is_error = _is_error_result(result)
+            if tc.name == "validate_fx_output" and not result_is_error:
+                try:
+                    validation_payload = json.loads(result)
+                    last_validation_errors = validation_payload.get("errors", [])
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    last_validation_errors = []
+                validated_candidate = _validated_output_from_call(tc.arguments, result)
+                if validated_candidate is not None:
+                    validated_output = validated_candidate
+                    # Also handle the less common order where the model writes
+                    # report.md first and validates it in a later tool call in
+                    # the same response.
+                    if _report_written(artifact_dir) and _canonicalize_fx_report(
+                        artifact_dir, validated_output
+                    ):
+                        _emit(
+                            event_callback,
+                            "fx_report_canonicalized",
+                            agent_id,
+                            task_id,
+                            {
+                                "path": "report.md",
+                                "reason": "machine JSON replaced with last validated output",
+                            },
+                        )
+            # A response may contain validation and report-writing calls in the
+            # same turn.  Update the trusted output first, then canonicalize the
+            # report so it cannot be compared against a stale validation result.
+            if (
+                not result_is_error
+                and tc.name == "write_file"
+                and _is_report_path(tc.arguments)
+                and validated_output is not None
+                and _canonicalize_fx_report(artifact_dir, validated_output)
+            ):
+                _emit(
+                    event_callback,
+                    "fx_report_canonicalized",
+                    agent_id,
+                    task_id,
+                    {
+                        "path": "report.md",
+                        "reason": "machine JSON replaced with last validated output",
+                    },
+                )
             if tc.name != "load_skill" and not result_is_error:
                 data_tool_calls += 1
             tc_elapsed = time.monotonic() - tc_start
@@ -701,9 +983,11 @@ def run_worker(
                 task_id,
                 {
                     "tool": tc.name,
+                    "call_id": tc.id,
                     "elapsed_ms": int(tc_elapsed * 1000),
                     "status": "error" if result_is_error else "ok",
                     "iteration": iteration,
+                    "output": _detail_tool_result(result),
                     "result_preview": _preview_tool_result(result),
                     **mcp_meta,
                 },
@@ -714,11 +998,15 @@ def run_worker(
 
     # Content filter ratio tracking
     content_filter_warnings = compute_content_filter_warnings(
-        content_filter_count, iteration + 1,
+        content_filter_count,
+        iteration + 1,
     )
 
     # Hit iteration limit — use last meaningful content as summary
-    summary = _best_summary(messages, last_assistant_content) or f"Worker hit iteration limit ({max_iterations} iterations)"
+    summary = (
+        _best_summary(messages, last_assistant_content)
+        or f"Worker hit iteration limit ({max_iterations} iterations)"
+    )
     summary = _resolve_summary(artifact_dir, summary)
     _write_summary(artifact_dir, summary)
     _persist_messages(artifact_dir, messages)
@@ -728,9 +1016,47 @@ def run_worker(
         report_written=_report_written(artifact_dir),
         data_tool_calls=data_tool_calls,
     )
+    if "validate_fx_output" in available_tools and validated_output is not None:
+        _canonicalize_fx_report(artifact_dir, validated_output)
+    validation_issue = (
+        _fx_validation_issue(artifact_dir, validated_output, last_validation_errors)
+        if "validate_fx_output" in available_tools
+        else None
+    )
+    if validation_issue:
+        _emit(
+            event_callback,
+            "worker_failed",
+            agent_id,
+            task_id,
+            _validation_failure_data(
+                agent_id=agent_id,
+                task_id=task_id,
+                iteration=max_iterations,
+                issue=validation_issue,
+                validation_errors=last_validation_errors,
+                artifact_dir=artifact_dir,
+                validated_output_present=validated_output is not None,
+            ),
+        )
+        return WorkerResult(
+            status="failed",
+            summary=summary,
+            artifact_paths=_collect_artifacts(artifact_dir),
+            iterations=max_iterations,
+            error=f"FX validation contract not met: {validation_issue}",
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            content_filter_warnings=content_filter_warnings,
+        )
     if reason:
-        _emit(event_callback, "worker_incomplete", agent_id, task_id,
-              {"iterations": max_iterations, "reason": f"iteration limit; {reason}"})
+        _emit(
+            event_callback,
+            "worker_incomplete",
+            agent_id,
+            task_id,
+            {"iterations": max_iterations, "reason": f"iteration limit; {reason}"},
+        )
         return WorkerResult(
             status="incomplete",
             summary=summary,
@@ -756,8 +1082,10 @@ def run_worker(
 def _best_summary(messages: list[dict], fallback: str) -> str:
     """Extract the best summary from all assistant messages."""
     texts = [
-        m["content"] for m in messages
-        if m.get("role") == "assistant" and m.get("content")
+        m["content"]
+        for m in messages
+        if m.get("role") == "assistant"
+        and m.get("content")
         and len(m["content"].strip()) > 100
     ]
     if texts:
@@ -806,6 +1134,26 @@ def _preview_tool_result(result: str) -> str:
     return _truncate_preview(redact_payload(parsed))
 
 
+def _detail_tool_result(result: str) -> Any:
+    """Return redacted structured Tool output for the local debug console."""
+    try:
+        parsed = json.loads(result)
+    except (TypeError, ValueError):
+        parsed = result
+    detail = redact_payload(parsed)
+    try:
+        encoded = json.dumps(detail, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return _truncate_preview(detail, limit=20_000)
+    if len(encoded) <= 50_000:
+        return detail
+    return {
+        "truncated": True,
+        "preview": encoded[:50_000] + "...",
+        "original_characters": len(encoded),
+    }
+
+
 def _truncate_preview(value: Any, *, limit: int = 200) -> str:
     """Stringify and truncate an event preview payload."""
     if isinstance(value, (dict, list)):
@@ -829,16 +1177,36 @@ _UNPARSED_TOOL_MARKERS = (
     "<tool_sep>",
     "tool\u2581sep",
 )
-_FABRICATION_MARKERS = ("mock data", "without actual data", "fabricated data", "placeholder data")
+_FABRICATION_MARKERS = (
+    "mock data",
+    "without actual data",
+    "fabricated data",
+    "placeholder data",
+)
 _PLAN_PREFIXES = (
-    "# phase 1", "## phase 1", "### phase 1",
-    "phase 1 \u2014 plan", "phase 1 - plan", "phase 1: plan",
-    "# plan", "## plan", "### plan", "**plan**",
+    "# phase 1",
+    "## phase 1",
+    "### phase 1",
+    "phase 1 \u2014 plan",
+    "phase 1 - plan",
+    "phase 1: plan",
+    "# plan",
+    "## plan",
+    "### plan",
+    "**plan**",
 )
 _HANDOFF_TAILS = (
-    "execute", "execute.", "execute:", "skills.", "skills", "proceed?",
-    "proceed.", "without writing files.", "let me adjust the approach",
-    "let me adjust the approach.", "stand by for final synthesis.",
+    "execute",
+    "execute.",
+    "execute:",
+    "skills.",
+    "skills",
+    "proceed?",
+    "proceed.",
+    "without writing files.",
+    "let me adjust the approach",
+    "let me adjust the approach.",
+    "stand by for final synthesis.",
 )
 
 
@@ -849,6 +1217,229 @@ def _report_written(artifact_dir: Path) -> bool:
         return p.is_file() and bool(p.read_text(encoding="utf-8").strip())
     except Exception:
         return False
+
+
+def _validated_output_from_call(
+    arguments: dict[str, Any], result: str
+) -> dict[str, Any] | None:
+    """Return the canonical output object when the deterministic validator passed.
+
+    The validator intentionally accepts a few compact/legacy aliases so an LLM
+    can recover from a schema error.  Keeping the raw call arguments here would
+    leak those aliases (and omit model-generated claim IDs) into ``report.md``
+    and every downstream agent.  Re-serializing the validated Pydantic model
+    gives all consumers one stable V2 shape.
+    """
+    try:
+        payload = json.loads(result)
+        if not isinstance(payload, dict) or payload.get("valid") is not True:
+            return None
+        output = arguments.get("output")
+        if isinstance(output, str):
+            output = json.loads(output)
+        if not isinstance(output, dict):
+            return None
+        if not output.get("evidence_context_id"):
+            context_id = arguments.get("evidence_context_id")
+            if context_id:
+                output = {**output, "evidence_context_id": str(context_id)}
+
+        # Only FX modes have a worker/report contract that benefits from
+        # canonical Pydantic serialization.  Generic swarm tools retain their
+        # historical behaviour and do not import the FX package at all.
+        mode = payload.get("mode")
+        model_types: dict[str, Any] = {}
+        if mode in {
+            "argument",
+            "hypothesis",
+            "relative_state",
+            "risk_review",
+            "decision",
+        }:
+            from src.fx_debate.contracts import (
+                AgentArgument,
+                FinalDecision,
+                HypothesisArgumentV2,
+                RelativeStateV2,
+                RiskReview,
+            )
+
+            model_types = {
+                "argument": AgentArgument,
+                "hypothesis": HypothesisArgumentV2,
+                "relative_state": RelativeStateV2,
+                "risk_review": RiskReview,
+                "decision": FinalDecision,
+            }
+        model_type = model_types.get(mode)
+        if model_type is None:
+            return output
+        try:
+            return model_type.model_validate(output).model_dump(mode="json")
+        except (TypeError, ValueError):
+            # The deterministic Tool has already returned valid=true.  Keep
+            # the original object as a defensive fallback if a test double or
+            # an older custom contract cannot be re-hydrated locally; never
+            # turn a successful validation into a false "never validated".
+            return output
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _is_report_path(arguments: dict[str, Any]) -> bool:
+    """Return whether a write_file call targets the worker's report.md."""
+    path = (
+        arguments.get("path") or arguments.get("file_path") or arguments.get("filepath")
+    )
+    if not isinstance(path, str):
+        return False
+    return Path(path).name == "report.md"
+
+
+def _canonicalize_fx_report(
+    artifact_dir: Path, validated_output: dict[str, Any]
+) -> bool:
+    """Keep the report's machine JSON identical to the last valid output.
+
+    Agents are allowed to write rich Markdown after validation, but a model
+    may accidentally add a helper field while copying the JSON into the
+    report. The validated object is the trusted source of truth, so replace
+    only the existing JSON fence and preserve the surrounding prose.
+    """
+    report_path = artifact_dir / "report.md"
+    try:
+        report = report_path.read_text(encoding="utf-8")
+        match = _machine_json_match(report)
+        canonical = json.dumps(
+            validated_output,
+            ensure_ascii=False,
+            indent=2,
+        )
+        if match is None:
+            # A model can omit the required fence after a transient retry.  The
+            # validated object is still authoritative, so append a machine
+            # section instead of failing an otherwise useful Markdown report.
+            suffix = f"\n\n## Machine-readable V2\n\n```json\n{canonical}\n```\n"
+            report_path.write_text(report.rstrip() + suffix, encoding="utf-8")
+            return True
+        try:
+            report_output = json.loads(match.group(1))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # Replace malformed machine output with the trusted object too;
+            # otherwise a valid tool call could still be stranded behind an
+            # LLM truncation or an unmatched quote.
+            report_output = None
+        if isinstance(report_output, dict) and report_output == validated_output:
+            return False
+        replacement = f"```json\n{canonical}\n```"
+        report_path.write_text(
+            report[: match.start()] + replacement + report[match.end() :],
+            encoding="utf-8",
+        )
+        return True
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("Failed to canonicalize FX report at %s", report_path)
+        return False
+
+
+def _machine_json_match(report: str) -> re.Match[str] | None:
+    """Find the report's authoritative machine-readable JSON fence.
+
+    Prefer the fence under the documented heading.  If a model adds another
+    JSON example in the prose, selecting the first generic fence can compare
+    the wrong object and produce a false contract failure.  As a compatibility
+    fallback, use the last fenced JSON block (the conventional final section).
+    """
+    heading = _MACHINE_HEADING.search(report)
+    if heading is not None:
+        local = _JSON_FENCE.search(heading.group(1))
+        if local is not None:
+            offset = heading.start(1) + local.start()
+            return _JSON_FENCE.search(report, pos=offset)
+        return None
+    matches = list(_JSON_FENCE.finditer(report))
+    return matches[-1] if matches else None
+
+
+def _fx_validation_issue(
+    artifact_dir: Path,
+    validated_output: dict[str, Any] | None,
+    validation_errors: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """Bind FX Worker completion to its validated machine-readable artifact."""
+    if validated_output is None:
+        details = _format_validation_errors(validation_errors or [])
+        return "validate_fx_output never returned valid=true" + details
+    report_path = artifact_dir / "report.md"
+    try:
+        report = report_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "report.md is missing or unreadable"
+    match = _machine_json_match(report)
+    candidate = match.group(1) if match else report
+    try:
+        report_output = json.loads(candidate)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "report.md does not contain one parseable JSON object"
+    if not isinstance(report_output, dict):
+        return "report.md machine output is not a JSON object"
+    if report_output != validated_output:
+        return "report.md machine JSON differs from the validated output"
+    return None
+
+
+def _format_validation_errors(errors: list[dict[str, Any]]) -> str:
+    """Expose actionable validator feedback without dumping the whole payload."""
+    if not errors:
+        return ""
+    compact: list[str] = []
+    for item in errors[:5]:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or "VALIDATION_ERROR")
+        path = str(item.get("path") or "")
+        message = str(item.get("message") or "")
+        compact.append(f"{code}{path}: {message}" if path else f"{code}: {message}")
+    return f"；具体错误：{' | '.join(compact)}" if compact else ""
+
+
+def _validation_failure_data(
+    *,
+    agent_id: str,
+    task_id: str,
+    iteration: int,
+    issue: str,
+    validation_errors: list[dict[str, Any]] | None,
+    artifact_dir: Path,
+    validated_output_present: bool = False,
+) -> dict[str, Any]:
+    """Build a redacted, UI-friendly failure envelope for contract failures.
+
+    The report payload itself remains in the normal Tool event.  This envelope
+    stores the stable failure classification, validator paths, and artifact
+    location so operators can correlate the failure without scraping prose.
+    """
+    errors = [item for item in (validation_errors or []) if isinstance(item, dict)]
+    return {
+        "iterations": iteration,
+        "error": f"FX validation contract not met: {issue}",
+        "error_kind": "fx_validation_contract",
+        "phase": "contract_validation",
+        "error_id": f"{task_id}:contract-validation:{iteration}",
+        "validation": {
+            "valid": False,
+            "errors": errors[:20],
+            "error_count": len(errors),
+            "validated_output_present": validated_output_present,
+            "report_path": str(artifact_dir / "report.md"),
+        },
+        "trace": {
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "iteration": iteration,
+            "last_tool": "validate_fx_output",
+        },
+    }
 
 
 def _is_data_agent(agent_spec: SwarmAgentSpec) -> bool:
@@ -902,14 +1493,18 @@ def _classify_deliverable(
         return "unparsed tool-call markup (provider did not parse tool calls)"
     if any(m in low for m in _FABRICATION_MARKERS):
         return "explicitly fabricated / mock data"
-    if text.startswith("{") and '"status"' in text[:40] and (
-        '"content"' in text[:300] or '"ok"' in text[:40]
+    if (
+        text.startswith("{")
+        and '"status"' in text[:40]
+        and ('"content"' in text[:300] or '"ok"' in text[:40])
     ):
         return "raw tool-result envelope, not analysis"
     if low.startswith(_PLAN_PREFIXES):
         tail = low.rsplit("phase 2", 1)[-1].strip() if "phase 2" in low else ""
-        if len(text) < 600 or low.rstrip().endswith(_HANDOFF_TAILS) or (
-            "phase 2" in low and len(tail) < 80
+        if (
+            len(text) < 600
+            or low.rstrip().endswith(_HANDOFF_TAILS)
+            or ("phase 2" in low and len(tail) < 80)
         ):
             return "plan-only stub (no executed analysis / conclusion)"
     if is_data_agent and not report_written and data_tool_calls == 0:

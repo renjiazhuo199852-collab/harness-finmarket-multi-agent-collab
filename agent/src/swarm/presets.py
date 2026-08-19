@@ -32,7 +32,14 @@ PRESETS_DIR = Path(__file__).resolve().parent / "presets"
 #: can add to and override the roster by name (mirrors USER_SKILLS_DIR in
 #: ``src/agent/skills.py``). Survives package upgrades.
 USER_PRESETS_DIR = Path.home() / ".vibe-trading" / "swarm" / "presets"
-_INTERNAL_TEMPLATE_VARS = {"upstream_context"}
+_INTERNAL_TEMPLATE_VARS = {
+    "upstream_context",
+    # Injected by the trusted FX Debate entry point; not part of the public
+    # three-variable handoff contract.
+    "resolved_request_json",
+    "evidence_context_json",
+    "evidence_context_id",
+}
 
 
 def _redact_home(path: Path) -> str:

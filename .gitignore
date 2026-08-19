@@ -66,11 +66,22 @@ data/overnight*.log
 data/*.log
 data/test_write.txt
 agent/.pytest_tmp/
+agent/.fx_debate_ui/
+agent/outputs/
+agent/.swarm/
 agent/vibe_trading.egg-info/
 agent/vibe_trading_ai.egg-info/
 agent/tests/e2e_backtest/
 dist/
 build/
+
+# Local handoff data and database exports. Keep source code and schema docs,
+# but do not publish licensed market-data snapshots or generated dumps.
+external/market-data-tools/database/*.sql
+external/market-data-tools/**/.pytest_cache/
+external/market-data-tools/**/__pycache__/
+external/market-data-tools/**/node_modules/
+external/market-data-tools/**/dist/
 
 # Local demo videos (too large for git; link to external host instead)
 assets/*.mp4

@@ -70,6 +70,7 @@ def build_registry(
     agent_config: "AgentConfig | None" = None,
     session_id: str | None = None,
     event_callback: Callable[[str, dict], None] | None = None,
+    cancel_checker: Callable[[], bool] | None = None,
     warn_callback: Callable[[str], None] | None = None,
     interactive: bool | None = None,
     _mcp_server_tool_name_segments: Mapping[str, str] | None = None,
@@ -98,6 +99,8 @@ def build_registry(
             persist per-session state.
         event_callback: Optional event callback injected into local tools that
             mutate session-scoped state.
+        cancel_checker: Optional cooperative cancellation check injected into
+            long-running session tools such as FX Debate.
         warn_callback: Optional callable invoked with operator-facing warning
             messages. When provided, server-name collision warnings are passed
             to this callback in addition to the standard logger so CLI and
@@ -121,6 +124,11 @@ def build_registry(
     )
     from src.tools.autopilot_tool import RunResearchAutopilotTool
     from src.tools.remember_tool import RememberTool
+    from src.tools.run_fx_debate_tool import (
+        RunFxDebateTool,
+        adapt_fx_debate_event_callback,
+    )
+    from src.tools.fx_data_query_tool import QueryFxDataTool
     from src.tools.swarm_tool import SwarmTool
 
     goal_tool_classes = {
@@ -147,6 +155,15 @@ def build_registry(
                 registry.register(cls(default_session_id=session_id, event_callback=event_callback))
             elif cls is SwarmTool:
                 registry.register(cls(include_shell_tools=include_shell_tools, event_callback=event_callback))
+            elif cls is RunFxDebateTool:
+                registry.register(
+                    cls(
+                        event_callback=adapt_fx_debate_event_callback(event_callback),
+                        cancel_checker=cancel_checker,
+                    )
+                )
+            elif cls is QueryFxDataTool:
+                registry.register(cls(event_callback=event_callback))
             else:
                 registry.register(cls())
         except Exception as exc:

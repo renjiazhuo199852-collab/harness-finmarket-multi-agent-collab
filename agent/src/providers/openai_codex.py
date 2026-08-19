@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlparse
@@ -64,22 +63,34 @@ class CodexAIMessage:
     content: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
-    response_metadata: dict[str, Any] = field(default_factory=lambda: {"finish_reason": "stop"})
+    response_metadata: dict[str, Any] = field(
+        default_factory=lambda: {"finish_reason": "stop"}
+    )
+    usage_metadata: dict[str, int] | None = None
 
     def __add__(self, other: "CodexAIMessage") -> "CodexAIMessage":
         finish_reason = other.response_metadata.get(
             "finish_reason",
             self.response_metadata.get("finish_reason", "stop"),
         )
-        reasoning = (
-            self.additional_kwargs.get("reasoning_content", "")
-            + other.additional_kwargs.get("reasoning_content", "")
-        )
+        reasoning = self.additional_kwargs.get(
+            "reasoning_content", ""
+        ) + other.additional_kwargs.get("reasoning_content", "")
+        output_items = [
+            *self.additional_kwargs.get("responses_output_items", []),
+            *other.additional_kwargs.get("responses_output_items", []),
+        ]
+        additional_kwargs: dict[str, Any] = {}
+        if reasoning:
+            additional_kwargs["reasoning_content"] = reasoning
+        if output_items:
+            additional_kwargs["responses_output_items"] = output_items
         return CodexAIMessage(
             content=(self.content or "") + (other.content or ""),
             tool_calls=[*self.tool_calls, *other.tool_calls],
-            additional_kwargs={"reasoning_content": reasoning} if reasoning else {},
+            additional_kwargs=additional_kwargs,
             response_metadata={"finish_reason": finish_reason},
+            usage_metadata=other.usage_metadata or self.usage_metadata,
         )
 
 
@@ -91,7 +102,9 @@ def login_openai_codex(
     try:
         from oauth_cli_kit import get_token, login_oauth_interactive
     except ImportError as exc:
-        raise RuntimeError("oauth-cli-kit is not installed. Run: pip install oauth-cli-kit") from exc
+        raise RuntimeError(
+            "oauth-cli-kit is not installed. Run: pip install oauth-cli-kit"
+        ) from exc
 
     token = None
     try:
@@ -100,7 +113,9 @@ def login_openai_codex(
         pass
     if token and getattr(token, "access", None):
         return token
-    return login_oauth_interactive(print_fn=print_fn or print, prompt_fn=prompt_fn or input)
+    return login_oauth_interactive(
+        print_fn=print_fn or print, prompt_fn=prompt_fn or input
+    )
 
 
 def get_openai_codex_login_status() -> Any | None:
@@ -129,9 +144,15 @@ def _get_codex_token() -> Any:
     try:
         token = get_token()
     except Exception as exc:
-        raise RuntimeError("OpenAI Codex is not logged in. Run: vibe-trading provider login openai-codex") from exc
-    if not (token and getattr(token, "access", None) and getattr(token, "account_id", None)):
-        raise RuntimeError("OpenAI Codex is not logged in. Run: vibe-trading provider login openai-codex")
+        raise RuntimeError(
+            "OpenAI Codex is not logged in. Run: vibe-trading provider login openai-codex"
+        ) from exc
+    if not (
+        token and getattr(token, "access", None) and getattr(token, "account_id", None)
+    ):
+        raise RuntimeError(
+            "OpenAI Codex is not logged in. Run: vibe-trading provider login openai-codex"
+        )
     return token
 
 
@@ -191,7 +212,9 @@ def _convert_user_message(content: Any) -> dict[str, Any]:
             elif item.get("type") == "image_url":
                 url = (item.get("image_url") or {}).get("url")
                 if url:
-                    converted.append({"type": "input_image", "image_url": url, "detail": "auto"})
+                    converted.append(
+                        {"type": "input_image", "image_url": url, "detail": "auto"}
+                    )
         if converted:
             return {"role": "user", "content": converted}
     return {"role": "user", "content": [{"type": "input_text", "text": ""}]}
@@ -206,7 +229,9 @@ def _split_tool_call_id(tool_call_id: Any) -> tuple[str, str | None]:
     return "call_0", None
 
 
-def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+def _convert_messages(
+    messages: list[dict[str, Any]]
+) -> tuple[str, list[dict[str, Any]]]:
     system_prompt = ""
     input_items: list[dict[str, Any]] = []
     for idx, msg in enumerate(messages):
@@ -217,28 +242,43 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
         elif role == "user":
             input_items.append(_convert_user_message(content))
         elif role == "assistant":
+            provider_state = msg.get("provider_state")
+            if isinstance(provider_state, dict):
+                for item in provider_state.get("responses_output_items") or []:
+                    if isinstance(item, dict) and item.get("type") == "reasoning":
+                        input_items.append(dict(item))
             if isinstance(content, str) and content:
-                input_items.append({
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": content}],
-                    "status": "completed",
-                    "id": f"msg_{idx}",
-                })
+                input_items.append(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": content}],
+                        "status": "completed",
+                        "id": f"msg_{idx}",
+                    }
+                )
             for tool_call in msg.get("tool_calls", []) or []:
                 fn = tool_call.get("function") or {}
                 call_id, item_id = _split_tool_call_id(tool_call.get("id"))
-                input_items.append({
-                    "type": "function_call",
-                    "id": item_id or f"fc_{idx}",
-                    "call_id": call_id or f"call_{idx}",
-                    "name": fn.get("name"),
-                    "arguments": fn.get("arguments") or "{}",
-                })
+                input_items.append(
+                    {
+                        "type": "function_call",
+                        "id": item_id or f"fc_{idx}",
+                        "call_id": call_id or f"call_{idx}",
+                        "name": fn.get("name"),
+                        "arguments": fn.get("arguments") or "{}",
+                    }
+                )
         elif role == "tool":
             call_id, _ = _split_tool_call_id(msg.get("tool_call_id"))
-            output = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-            input_items.append({"type": "function_call_output", "call_id": call_id, "output": output})
+            output = (
+                content
+                if isinstance(content, str)
+                else json.dumps(content, ensure_ascii=False)
+            )
+            input_items.append(
+                {"type": "function_call_output", "call_id": call_id, "output": output}
+            )
     return system_prompt, input_items
 
 
@@ -250,12 +290,14 @@ def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
         if not name:
             continue
         params = fn.get("parameters") or {}
-        converted.append({
-            "type": "function",
-            "name": name,
-            "description": fn.get("description") or "",
-            "parameters": params if isinstance(params, dict) else {},
-        })
+        converted.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": fn.get("description") or "",
+                "parameters": params if isinstance(params, dict) else {},
+            }
+        )
     return converted
 
 
@@ -311,7 +353,9 @@ def _events_from_lines(lines: Iterable[str]) -> Iterable[dict[str, Any]]:
             yield event
 
 
-def _message_chunks_from_events(events: Iterable[dict[str, Any]]) -> Iterable[CodexAIMessage]:
+def _message_chunks_from_events(
+    events: Iterable[dict[str, Any]]
+) -> Iterable[CodexAIMessage]:
     tool_buffers: dict[str, dict[str, Any]] = {}
     for event in events:
         event_type = event.get("type")
@@ -327,6 +371,13 @@ def _message_chunks_from_events(events: Iterable[dict[str, Any]]) -> Iterable[Co
             delta = event.get("delta") or ""
             if delta:
                 yield CodexAIMessage(content=delta)
+        elif event_type in {
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta",
+        }:
+            delta = event.get("delta") or ""
+            if delta:
+                yield CodexAIMessage(additional_kwargs={"reasoning_content": delta})
         elif event_type == "response.function_call_arguments.delta":
             call_id = event.get("call_id")
             if call_id in tool_buffers:
@@ -337,7 +388,11 @@ def _message_chunks_from_events(events: Iterable[dict[str, Any]]) -> Iterable[Co
                 tool_buffers[call_id]["arguments"] = event.get("arguments") or ""
         elif event_type == "response.output_item.done":
             item = event.get("item") or {}
-            if item.get("type") == "function_call" and item.get("call_id"):
+            if item.get("type") == "reasoning":
+                yield CodexAIMessage(
+                    additional_kwargs={"responses_output_items": [dict(item)]}
+                )
+            elif item.get("type") == "function_call" and item.get("call_id"):
                 call_id = item["call_id"]
                 buf = tool_buffers.get(call_id) or {}
                 args_raw = buf.get("arguments") or item.get("arguments") or "{}"
@@ -348,11 +403,23 @@ def _message_chunks_from_events(events: Iterable[dict[str, Any]]) -> Iterable[Co
                 )
                 yield CodexAIMessage(tool_calls=[tool.as_langchain_tool_call()])
         elif event_type == "response.completed":
-            status = (event.get("response") or {}).get("status")
-            yield CodexAIMessage(response_metadata={"finish_reason": _map_finish_reason(status)})
+            response = event.get("response") or {}
+            status = response.get("status")
+            usage = response.get("usage") or {}
+            usage_metadata = None
+            if usage:
+                usage_metadata = {
+                    "input_tokens": int(usage.get("input_tokens") or 0),
+                    "output_tokens": int(usage.get("output_tokens") or 0),
+                    "total_tokens": int(usage.get("total_tokens") or 0),
+                }
+            yield CodexAIMessage(
+                response_metadata={"finish_reason": _map_finish_reason(status)},
+                usage_metadata=usage_metadata,
+            )
         elif event_type in {"error", "response.failed"}:
             detail = event.get("error") or event.get("message") or event
-            raise RuntimeError(f"OpenAI Codex response failed: {str(detail)[:500]}")
+            raise RuntimeError(f"OpenAI Responses request failed: {str(detail)[:500]}")
 
 
 class OpenAICodexLLM:
@@ -369,7 +436,9 @@ class OpenAICodexLLM:
         codex_url: str | None = None,
     ) -> None:
         if httpx is None:
-            raise RuntimeError("OpenAI Codex OAuth requires httpx. Install dependencies first.")
+            raise RuntimeError(
+                "OpenAI Codex OAuth requires httpx. Install dependencies first."
+            )
         self.model = model
         self.temperature = temperature
         self.timeout = timeout
@@ -414,23 +483,38 @@ class OpenAICodexLLM:
         token = _get_codex_token()
         return _build_headers(str(token.account_id), str(token.access))
 
-    def stream(self, messages: list[dict[str, Any]], config: Optional[dict[str, Any]] = None) -> Iterable[CodexAIMessage]:
+    def stream(
+        self, messages: list[dict[str, Any]], config: Optional[dict[str, Any]] = None
+    ) -> Iterable[CodexAIMessage]:
         timeout = (config or {}).get("timeout") or self.timeout
-        with httpx.Client(timeout=timeout, follow_redirects=True, trust_env=True) as client:
-            with client.stream("POST", self.codex_url, headers=self._headers(), json=self._body(messages, stream=True)) as response:
+        with httpx.Client(
+            timeout=timeout, follow_redirects=True, trust_env=True
+        ) as client:
+            with client.stream(
+                "POST",
+                self.codex_url,
+                headers=self._headers(),
+                json=self._body(messages, stream=True),
+            ) as response:
                 if response.status_code != 200:
                     raw = response.read().decode("utf-8", "ignore")
                     # Raise the typed CodexStreamError (carries ``status_code``)
                     # so ``ProviderStreamError.retryable`` can correctly classify
                     # deterministic 4xx as non-retryable.
                     raise CodexStreamError(response.status_code, raw)
-                yield from _message_chunks_from_events(_events_from_lines(response.iter_lines()))
+                yield from _message_chunks_from_events(
+                    _events_from_lines(response.iter_lines())
+                )
 
-    def invoke(self, messages: list[dict[str, Any]], config: Optional[dict[str, Any]] = None) -> CodexAIMessage:
+    def invoke(
+        self, messages: list[dict[str, Any]], config: Optional[dict[str, Any]] = None
+    ) -> CodexAIMessage:
         accumulated: CodexAIMessage | None = None
         for chunk in self.stream(messages, config=config):
             accumulated = chunk if accumulated is None else accumulated + chunk
         return accumulated or CodexAIMessage()
 
-    async def ainvoke(self, messages: list[dict[str, Any]], config: Optional[dict[str, Any]] = None) -> CodexAIMessage:
+    async def ainvoke(
+        self, messages: list[dict[str, Any]], config: Optional[dict[str, Any]] = None
+    ) -> CodexAIMessage:
         return await asyncio.to_thread(self.invoke, messages, config)

@@ -7,6 +7,7 @@ Enums use str+Enum to ensure JSON-serialization compatibility.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -175,6 +176,9 @@ class SwarmRun(BaseModel):
             original symbol string; each value is the list of bars returned
             by the loader. ``None`` when no symbols were detected or every
             fetch failed.
+        trusted_context: Runtime-owned values kept separate from public
+            template variables. FX Debate stores resolved instrument identity
+            and immutable evidence scope here.
     """
 
     id: str
@@ -191,6 +195,7 @@ class SwarmRun(BaseModel):
     provider: str | None = None
     model: str | None = None
     grounding_data: dict[str, list[dict]] | None = None
+    trusted_context: dict[str, Any] | None = None
 
 
 class WorkerResult(BaseModel):

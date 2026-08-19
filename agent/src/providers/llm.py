@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -333,6 +334,33 @@ logger = logging.getLogger(__name__)
 
 _dotenv_loaded: bool = False
 
+_NO_PROXY_ENV_NAMES = ("NO_PROXY", "no_proxy")
+
+
+def _normalize_no_proxy_ipv6(value: str | None) -> str | None:
+    """Drop IPv6 loopback entries unsupported by this httpx proxy parser.
+
+    In the installed httpx release, both ::1 and [::1] are parsed as malformed
+    proxy URLs. Keep the equivalent localhost and IPv4 loopback entries, which
+    are already present in the generated developer NO_PROXY value.
+    """
+    if value is None:
+        return None
+    entries = []
+    for raw in value.split(","):
+        entry = raw.strip()
+        if entry not in {"::1", "::1/128", "[::1]", "[::1]/128"}:
+            entries.append(entry)
+    return ",".join(entries)
+
+
+def _normalize_no_proxy_env() -> None:
+    """Apply the httpx-compatible loopback representation in process memory."""
+    for name in _NO_PROXY_ENV_NAMES:
+        normalized = _normalize_no_proxy_ipv6(os.getenv(name))
+        if normalized is not None:
+            os.environ[name] = normalized
+
 
 def _redact_env_source(loaded: Path | None) -> str:
     """Map a resolved `.env` candidate to a stable, leak-free label.
@@ -471,7 +499,8 @@ def _build_anthropic(
         timeout=get_env_config().llm.timeout_seconds,
         max_retries=get_env_config().llm.max_retries,
         callbacks=callbacks,
-        api_key=os.getenv("ANTHROPIC_API_KEY") or None,  # noqa: env-gate — native provider credential
+        api_key=os.getenv("ANTHROPIC_API_KEY")
+        or None,  # noqa: env-gate — native provider credential
         base_url=(
             os.getenv("ANTHROPIC_BASE_URL")  # noqa: env-gate — native provider endpoint
             or os.getenv("ANTHROPIC_API_URL")  # noqa: env-gate — SDK-compatible alias
@@ -543,6 +572,7 @@ def _sync_provider_env() -> None:
     api_key_env=None means no key required (e.g. Ollama local).
     """
     _ensure_dotenv()
+    _normalize_no_proxy_env()
     reset_env_config()
     provider = get_env_config().llm.langchain_provider.lower()
 
@@ -608,9 +638,7 @@ def provider_diagnostics() -> dict[str, Any]:
     adapter_mode = (
         _deepseek_adapter_mode()
         if caps.name == "deepseek"
-        else "native"
-        if caps.name == "anthropic"
-        else "openai-compatible"
+        else "native" if caps.name == "anthropic" else "openai-compatible"
     )
     adapter_type = (
         "native"
@@ -697,6 +725,33 @@ def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any
             temperature=temperature,
             timeout=get_env_config().llm.timeout_seconds,
             reasoning_effort=effort or None,
+        )
+
+    if get_env_config().llm.langchain_wire_api == "responses":
+        from src.providers.openai_responses import OpenAIResponsesLLM
+
+        credentials = get_llm_credentials(provider, name)
+        raw_headers = get_env_config().llm.openai_responses_http_headers.strip()
+        try:
+            custom_headers = json.loads(raw_headers or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "OPENAI_RESPONSES_HTTP_HEADERS must be valid JSON"
+            ) from exc
+        if not isinstance(custom_headers, dict):
+            raise ValueError("OPENAI_RESPONSES_HTTP_HEADERS must be a JSON object")
+        return OpenAIResponsesLLM(
+            model=name,
+            api_key=credentials["api_key"],
+            base_url=credentials["base_url"],
+            timeout=get_env_config().llm.timeout_seconds,
+            reasoning_effort=(
+                get_env_config().llm.langchain_reasoning_effort.strip() or None
+            ),
+            reasoning_context=(get_env_config().llm.openai_responses_reasoning_context),
+            store=not get_env_config().llm.openai_disable_response_storage,
+            text_verbosity=get_env_config().llm.openai_responses_text_verbosity,
+            custom_headers=custom_headers,
         )
 
     if provider == "anthropic":

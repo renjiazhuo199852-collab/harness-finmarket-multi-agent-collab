@@ -74,6 +74,23 @@ class UpdateLLMSettingsRequest(BaseModel):
     reasoning_effort: Optional[str] = None
 
 
+class TestLLMProviderRequest(BaseModel):
+    """Parameters for a read-only, server-side provider connectivity check."""
+
+    provider: str = Field(..., min_length=1)
+    base_url: str = Field(..., min_length=1)
+    api_key: Optional[str] = None
+
+
+class TestLLMProviderResponse(BaseModel):
+    """Safe provider probe result; credentials are never returned."""
+
+    ok: bool
+    endpoint: str
+    status: Optional[int] = None
+    message: Optional[str] = None
+
+
 class DataSourceSettingsResponse(BaseModel):
     """Current data source credential settings."""
 
@@ -312,6 +329,128 @@ def _persist_settings_updates(updates: Dict[str, str]) -> Dict[str, str]:
     return host._read_env_values(target)
 
 
+def _provider_model_endpoints(base_url: str) -> List[str]:
+    """Build conservative model-list candidates from an API base URL.
+
+    The settings UI accepts an API *base* (usually ending in ``/v1``), not a
+    browser page or a full ``/chat/completions`` endpoint.  Trying both common
+    roots makes diagnostics useful for small self-hosted gateways while the
+    runtime still receives the base URL entered by the user.
+    """
+    base = base_url.strip().rstrip("/")
+    for suffix in ("/chat/completions", "/responses", "/models"):
+        if base.lower().endswith(suffix):
+            base = base[: -len(suffix)].rstrip("/")
+            break
+    if not base.startswith(("http://", "https://")):
+        raise ValueError("接口地址必须以 http:// 或 https:// 开头")
+    if base.lower().endswith("/v1"):
+        return [f"{base}/models"]
+    return [f"{base}/v1/models", f"{base}/models"]
+
+
+async def _probe_provider_models(
+    base_url: str,
+    api_key: str,
+) -> TestLLMProviderResponse:
+    """Probe an OpenAI-compatible ``GET /models`` endpoint from the server."""
+    try:
+        endpoints = _provider_model_endpoints(base_url)
+    except ValueError as exc:
+        return TestLLMProviderResponse(ok=False, endpoint=base_url.strip(), message=str(exc))
+
+    try:
+        import httpx
+    except ImportError:
+        return TestLLMProviderResponse(
+            ok=False,
+            endpoint=endpoints[0],
+            message="后端缺少 httpx，无法测试供应商接口",
+        )
+
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    last_status: Optional[int] = None
+    last_message = ""
+    try:
+        async with httpx.AsyncClient(
+            # Do not follow user-supplied redirects from a settings probe.
+            # This keeps the diagnostic endpoint from becoming an SSRF hop.
+            follow_redirects=False,
+            timeout=httpx.Timeout(15.0, connect=5.0),
+        ) as client:
+            for endpoint in endpoints:
+                try:
+                    response = await client.get(endpoint, headers=headers)
+                except httpx.TimeoutException:
+                    return TestLLMProviderResponse(
+                        ok=False, endpoint=endpoint, message="请求超时，请检查地址和服务是否可达"
+                    )
+                except httpx.HTTPError as exc:
+                    return TestLLMProviderResponse(
+                        ok=False, endpoint=endpoint, message=f"后端无法连接供应商：{exc}"
+                    )
+
+                last_status = response.status_code
+                content_type = response.headers.get("content-type", "").lower()
+                body = response.text.strip()
+                if 200 <= response.status_code < 300:
+                    try:
+                        parsed_body = json.loads(body)
+                        if not isinstance(parsed_body, (dict, list)):
+                            raise json.JSONDecodeError("expected object or array", body, 0)
+                    except json.JSONDecodeError:
+                        if "html" in content_type or body.lower().startswith(("<!doctype html", "<html")):
+                            message = "接口返回的是网页内容，不是 JSON 模型接口；请填写 API 基地址"
+                        else:
+                            message = "接口返回内容不是有效 JSON，无法确认 OpenAI-compatible 协议"
+                        return TestLLMProviderResponse(
+                            ok=False,
+                            endpoint=endpoint,
+                            status=response.status_code,
+                            message=message,
+                        )
+                    return TestLLMProviderResponse(
+                        ok=True,
+                        endpoint=endpoint,
+                        status=response.status_code,
+                        message="模型列表接口响应正常",
+                    )
+
+                if response.status_code in {401, 403}:
+                    return TestLLMProviderResponse(
+                        ok=False,
+                        endpoint=endpoint,
+                        status=response.status_code,
+                        message="接口地址可达，但 API 密钥无效、缺失或无权限",
+                    )
+
+                last_message = body[:240] or f"HTTP {response.status_code}"
+                if response.status_code != 404:
+                    return TestLLMProviderResponse(
+                        ok=False,
+                        endpoint=endpoint,
+                        status=response.status_code,
+                        message=last_message,
+                    )
+    except httpx.HTTPError as exc:
+        return TestLLMProviderResponse(
+            ok=False, endpoint=endpoints[0], message=f"后端无法连接供应商：{exc}"
+        )
+
+    return TestLLMProviderResponse(
+        ok=False,
+        endpoint=endpoints[-1],
+        status=last_status,
+        message=(
+            "未找到 /models 接口。请填写 OpenAI-compatible API 基地址，"
+            "例如 https://your-host.example/v1"
+            + (f"；服务返回：{last_message}" if last_message else "")
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -348,6 +487,27 @@ def register_settings_routes(
     async def get_llm_settings():
         """Return project-local LLM settings for the Web UI."""
         return _build_llm_settings_response()
+
+    @app.post(
+        "/settings/llm/test",
+        response_model=TestLLMProviderResponse,
+        dependencies=[Depends(require_local_or_auth)],
+    )
+    async def test_llm_provider(payload: TestLLMProviderRequest):
+        """Probe a provider from the backend so browser CORS is irrelevant."""
+        provider_name = payload.provider.strip().lower()
+        provider = LLM_PROVIDER_BY_NAME.get(provider_name)
+        if provider is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported LLM provider"
+            )
+        api_key = (payload.api_key or "").strip()
+        if not api_key and provider.api_key_env:
+            current_values = _read_settings_env_values()
+            candidate = current_values.get(provider.api_key_env, "")
+            if _host()._is_configured_secret(candidate, LLM_API_KEY_PLACEHOLDERS):
+                api_key = candidate
+        return await _probe_provider_models(payload.base_url, api_key)
 
     @app.put(
         "/settings/llm",

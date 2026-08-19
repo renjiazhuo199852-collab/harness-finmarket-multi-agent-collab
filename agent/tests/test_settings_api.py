@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api_server
+from src.api import settings_routes
 
 
 @pytest.fixture
@@ -138,6 +139,91 @@ def test_update_deepseek_settings_uses_exact_reported_payload(
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "DEEPSEEK_API_KEY=sk-deepseek-test" in env_text
     assert "DEEPSEEK_BASE_URL=https://api.deepseek.com/v1" in env_text
+
+
+def test_update_custom_provider_uses_openai_compatible_namespace(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    response = client.put(
+        "/settings/llm",
+        json={
+            "provider": "custom",
+            "model_name": "my-finance-model",
+            "base_url": "https://models.example.test/v1",
+            "api_key": "custom-secret",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["provider"] == "custom"
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "LANGCHAIN_PROVIDER=custom" in env_text
+    assert "CUSTOM_API_KEY=custom-secret" in env_text
+    assert "CUSTOM_BASE_URL=https://models.example.test/v1" in env_text
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://models.example.test/v1", ["https://models.example.test/v1/models"]),
+        (
+            "https://models.example.test",
+            [
+                "https://models.example.test/v1/models",
+                "https://models.example.test/models",
+            ],
+        ),
+        (
+            "https://models.example.test/v1/chat/completions",
+            ["https://models.example.test/v1/models"],
+        ),
+    ],
+)
+def test_provider_probe_normalizes_openai_compatible_base_urls(
+    base_url: str, expected: list[str],
+) -> None:
+    assert settings_routes._provider_model_endpoints(base_url) == expected
+
+
+def test_provider_probe_rejects_a_web_page_url() -> None:
+    result = __import__("asyncio").run(
+        settings_routes._probe_provider_models("models.example.test", "")
+    )
+    assert result.ok is False
+    assert "http://" in (result.message or "")
+
+
+def test_provider_probe_route_runs_on_backend_and_does_not_echo_key(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    async def fake_probe(base_url: str, api_key: str):
+        captured.update(base_url=base_url, api_key=api_key)
+        return settings_routes.TestLLMProviderResponse(
+            ok=True,
+            endpoint=f"{base_url.rstrip('/')}/v1/models",
+            status=200,
+            message="模型列表接口响应正常",
+        )
+
+    monkeypatch.setattr(settings_routes, "_probe_provider_models", fake_probe)
+    response = client.post(
+        "/settings/llm/test",
+        json={
+            "provider": "custom",
+            "base_url": "https://models.example.test",
+            "api_key": "probe-secret",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert captured == {
+        "base_url": "https://models.example.test",
+        "api_key": "probe-secret",
+    }
+    assert "probe-secret" not in response.text
 
 
 @pytest.mark.parametrize(

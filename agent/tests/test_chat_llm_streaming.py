@@ -38,9 +38,15 @@ class _FakeChunk:
 
 
 class _FakeStreamingLLM:
-    def __init__(self, chunks: list[_FakeChunk] | None = None, exc: Exception | None = None) -> None:
+    def __init__(
+        self,
+        chunks: list[_FakeChunk] | None = None,
+        exc: Exception | None = None,
+        invoke_result: _FakeChunk | None = None,
+    ) -> None:
         self.chunks = chunks or []
         self.exc = exc
+        self.invoke_result = invoke_result
         self.invoke_called = False
 
     def bind_tools(self, tools: list[dict[str, Any]]) -> "_FakeStreamingLLM":
@@ -53,7 +59,7 @@ class _FakeStreamingLLM:
 
     def invoke(self, messages: list[dict[str, Any]], config: dict[str, Any] | None = None):
         self.invoke_called = True
-        return _FakeChunk(content="fallback")
+        return self.invoke_result or _FakeChunk(content="fallback")
 
 
 def _client(fake_llm: _FakeStreamingLLM) -> ChatLLM:
@@ -168,6 +174,29 @@ def test_anthropic_content_blocks_stream_with_native_tool_call() -> None:
     assert response.finish_reason == "tool_calls"
     assert response.tool_calls[0].id == "toolu_1"
     assert response.tool_calls[0].arguments == {"symbol": "AAPL"}
+
+
+def test_empty_stream_tool_call_falls_back_to_non_streaming_invoke() -> None:
+    """Some OpenAI-compatible gateways stream an empty tool-call shell.
+
+    The non-streaming endpoint still returns the complete native call, so the
+    ReAct loop must retry that request instead of treating the turn as a blank
+    final answer.
+    """
+    malformed = _FakeChunk(finish_reason="tool_calls")
+    complete = _FakeChunk(finish_reason="tool_calls")
+    complete.tool_calls = [
+        {"id": "call-1", "name": "echo_probe", "args": {"value": "pong"}}
+    ]
+    fake = _FakeStreamingLLM([malformed], invoke_result=complete)
+
+    response = _client(fake).stream_chat(
+        [{"role": "user", "content": "call the tool"}],
+        tools=[{"type": "function", "function": {"name": "echo_probe"}}],
+    )
+
+    assert fake.invoke_called is True
+    assert response.tool_calls[0].name == "echo_probe"
 
 
 def test_should_cancel_stops_stream_early() -> None:

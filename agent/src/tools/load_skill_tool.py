@@ -17,19 +17,27 @@ class LoadSkillTool(BaseTool):
     parameters = {
         "type": "object",
         "properties": {
-            "name": {"type": "string", "description": "Skill name (e.g. 'strategy-generate', 'momentum')"},
+            "name": {
+                "type": "string",
+                "description": "Skill name (e.g. 'strategy-generate', 'momentum')",
+            },
         },
         "required": ["name"],
     }
     repeatable = True
 
-    def __init__(self, skills_loader: SkillsLoader | None = None) -> None:
+    def __init__(
+        self,
+        skills_loader: SkillsLoader | None = None,
+        allowed_names: set[str] | None = None,
+    ) -> None:
         """Initialize LoadSkillTool.
 
         Args:
             skills_loader: SkillsLoader instance; creates one automatically if omitted.
         """
         self._loader = skills_loader or SkillsLoader()
+        self._allowed_names = allowed_names
 
     def execute(self, **kwargs: Any) -> str:
         """Load skill documentation.
@@ -41,8 +49,20 @@ class LoadSkillTool(BaseTool):
             Full skill documentation or an error message.
         """
         name = kwargs["name"]
+        if self._allowed_names is not None and name not in self._allowed_names:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "code": "SKILL_NOT_ALLOWED",
+                    "content": f"Skill '{name}' is not assigned to this agent.",
+                },
+                ensure_ascii=False,
+            )
         content = self._loader.get_content(name)
-        return json.dumps({
-            "status": "ok" if not content.startswith("Error:") else "error",
-            "content": content,
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "status": "ok" if not content.startswith("Error:") else "error",
+                "content": content,
+            },
+            ensure_ascii=False,
+        )

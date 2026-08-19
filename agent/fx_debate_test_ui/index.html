@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>多币种 FX Debate 工作台</title>
+    <script>
+      try {
+        const savedTheme = localStorage.getItem("fx-debate-theme");
+        if (savedTheme === "light" || savedTheme === "dark") {
+          document.documentElement.dataset.theme = savedTheme;
+        }
+      } catch (_error) {
+        // The page can still load with the default theme when storage is unavailable.
+      }
+    </script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260817-01" />
+    <script src="/static/run-view.js?v=20260817-01" defer></script>
+    <script src="/static/app.js?v=20260817-01" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>多币种 FX Debate 工作台 <span class="legacy-title">EUR/USD 五 Agent 调试控制台 · 支持主要货币对</span></h1>
+        <p>对话、协作画布与可审计证据流</p>
+      </div>
+      <div class="top-status">
+        <button class="theme-toggle" id="theme-toggle" type="button" title="切换到浅色主题" aria-label="切换到浅色主题">☀</button>
+        <span class="status-chip pending" id="database-status">数据源检查中</span>
+        <span class="status-chip pending" id="llm-status">LLM 检查中</span>
+        <span class="status-chip idle" id="run-status">未运行</span>
+        <span class="elapsed" id="elapsed">00:00</span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar config-panel">
+        <section class="history-section">
+          <div class="section-title">
+            <h2>会话历史</h2>
+            <button class="icon-button" id="new-conversation" type="button" title="新建会话">＋</button>
+          </div>
+          <div class="history-list" id="conversation-list">
+            <div class="history-empty">暂无历史会话</div>
+          </div>
+        </section>
+        <section>
+          <div class="section-title">
+            <h2>运行参数</h2>
+            <span id="selected-symbol-label">EUR/USD</span>
+          </div>
+          <form id="run-form">
+            <label>
+              货币对
+              <select id="symbol">
+                <option value="EUR/USD">EUR/USD · 欧元 / 美元</option>
+                <option value="GBP/USD">GBP/USD · 英镑 / 美元</option>
+                <option value="USD/JPY">USD/JPY · 美元 / 日元</option>
+                <option value="AUD/USD">AUD/USD · 澳元 / 美元</option>
+                <option value="USD/CAD">USD/CAD · 美元 / 加元</option>
+                <option value="USD/CHF">USD/CHF · 美元 / 瑞郎</option>
+                <option value="NZD/USD">NZD/USD · 新西兰元 / 美元</option>
+                <option value="EUR/JPY">EUR/JPY · 欧元 / 日元</option>
+              </select>
+            </label>
+            <label>
+              研究期限
+              <span class="field-row">
+                <input id="horizon-count" type="number" value="2" min="1" max="90" />
+                <select id="horizon-unit">
+                  <option value="weeks">周</option>
+                  <option value="days">天</option>
+                </select>
+              </span>
+            </label>
+            <label>
+              技术周期
+              <select id="timeframe">
+                <option value="4H/1D">4H + 1D</option>
+                <option value="4H">4H</option>
+                <option value="1D">1D</option>
+              </select>
+            </label>
+            <label>
+              风险偏好
+              <select id="risk-profile">
+                <option value="balanced">平衡 · 0.50%</option>
+                <option value="conservative">保守 · 0.25%</option>
+                <option value="aggressive">积极 · 1.00%</option>
+              </select>
+            </label>
+            <label>
+              数据截止时间
+              <input id="as-of" type="datetime-local" />
+            </label>
+            <label>
+              请求编号
+              <input id="request-id" type="text" placeholder="自动生成" maxlength="80" />
+            </label>
+            <label class="confirm-row">
+              <input id="confirm-cost" type="checkbox" />
+              <span>确认执行真实数据读取和 LLM 调用</span>
+            </label>
+            <button id="run-button" type="submit" disabled>启动 Debate</button>
+          </form>
+          <p class="form-message" id="form-message">正在检查运行环境。</p>
+        </section>
+
+        <section class="run-meta">
+          <h2>任务</h2>
+          <dl>
+            <div><dt>本地任务</dt><dd id="job-id">—</dd></div>
+            <div><dt>Swarm Run</dt><dd id="swarm-id">—</dd></div>
+            <div><dt>事件数</dt><dd id="event-count">0</dd></div>
+          </dl>
+        </section>
+
+        <section class="result-summary hidden" id="result-summary">
+          <h2>最终结果</h2>
+          <dl>
+            <div><dt>决策</dt><dd id="decision">—</dd></div>
+            <div><dt>置信度</dt><dd id="confidence">—</dd></div>
+          </dl>
+          <button class="secondary" id="show-report" type="button">查看完整报告</button>
+        </section>
+      </aside>
+
+      <div class="pane-splitter" data-resize="left" role="separator" aria-label="调整左侧面板宽度" tabindex="0"></div>
+
+      <section class="console">
+        <div class="console-head">
+          <div>
+            <div class="workspace-title-row">
+              <h2 id="workspace-symbol-title">EUR/USD 分析</h2>
+              <span class="context-badge" id="context-badge">未创建 Evidence Context</span>
+            </div>
+            <p id="console-message">用下方对话框描述研究目标，运行后可切换到协作画布。</p>
+          </div>
+          <div class="view-tabs" id="view-tabs" role="tablist" aria-label="工作区视图">
+            <button class="active" data-view="chat" type="button">对话</button>
+            <button data-view="canvas" type="button">协作画布</button>
+            <button data-view="data" type="button">数据概览</button>
+            <button data-view="logs" type="button">流程日志</button>
+            <button data-view="report" type="button">最终报告</button>
+            <button data-view="settings" type="button">设置</button>
+          </div>
+          <div class="filters" id="filters" role="group" aria-label="事件筛选">
+            <button class="active" data-filter="all" type="button">全部</button>
+            <button data-filter="agent" type="button">Agent</button>
+            <button data-filter="tool" type="button">Tool</button>
+            <button data-filter="sdk" type="button">SDK</button>
+            <button data-filter="database" type="button">DB</button>
+          </div>
+        </div>
+
+        <section class="active-strip">
+          <div class="subhead">
+            <h3>当前工作</h3>
+            <span id="active-count">0</span>
+          </div>
+          <div class="active-calls empty" id="active-calls">当前没有活动调用</div>
+        </section>
+
+        <div class="console-body">
+          <section class="view-panel chat-page" id="chat-view">
+            <div class="chat-page-head">
+              <div>
+                <span class="eyebrow">FX DEBATE / RESEARCH REQUEST</span>
+                <h3>告诉我你想研究什么</h3>
+                <p>输入自然语言目标，系统会冻结 Evidence Context，再由五个 Agent 分阶段完成分析。</p>
+              </div>
+              <span class="chat-page-status" id="chat-page-status">等待请求</span>
+            </div>
+            <div class="chat-suggestions" id="chat-suggestions" aria-label="快捷研究目标">
+              <button type="button" data-prompt-template="分析 {symbol} 未来两周走势，重点关注相对利率差、宏观数据和 4H/1D 技术状态。">两周方向判断</button>
+              <button type="button" data-prompt-template="复核 {symbol} 当前上涨与下跌假设，列出最强反证、可测量失效条件和缺失数据。">双向假设证伪</button>
+              <button type="button" data-prompt="只做相对宏观与技术状态分析，说明 1D 与 4H 是否交叉确认，不给交易动作。">宏观 × 技术状态</button>
+            </div>
+            <section class="chat-thread" id="chat-thread" aria-live="polite"></section>
+            <div class="chat-page-footer">
+              <span>Enter 发送 · Shift + Enter 换行</span>
+              <span>数据与模型调用会产生运行记录</span>
+            </div>
+          </section>
+          <section class="view-panel canvas-panel hidden" id="canvas-view">
+            <div class="canvas-toolbar">
+              <div>
+                <h3>FX Debate 数据流</h3>
+                <p>点击节点查看该 Agent 的输入、Tool、输出和证据。</p>
+              </div>
+              <span class="canvas-progress" id="canvas-progress">0 / 5 完成</span>
+            </div>
+            <div class="debate-canvas" id="debate-canvas" aria-label="FX Debate 协作画布"></div>
+            <div class="canvas-legend">
+              <span><i class="legend-dot waiting"></i>等待</span>
+              <span><i class="legend-dot running"></i>运行中</span>
+              <span><i class="legend-dot completed"></i>完成</span>
+              <span><i class="legend-dot failed"></i>失败</span>
+            </div>
+          </section>
+          <section class="view-panel data-panel hidden" id="data-view">
+            <div class="canvas-toolbar">
+              <div>
+                <h3>Evidence Bundle 数据概览</h3>
+                <p>冻结上下文、数据完整度和可用性状态。点击数据域可预览本轮实际输入。</p>
+              </div>
+              <button class="text-button" id="copy-context" type="button">复制 Context</button>
+            </div>
+            <div class="data-health-grid" id="data-health-grid"></div>
+            <section class="data-preview-section" aria-label="证据数据预览">
+              <div class="data-preview-head">
+                <div>
+                  <h4>数据明细预览</h4>
+                  <p id="data-preview-meta">运行后显示本轮 Evidence Bundle 的限量明细。</p>
+                </div>
+                <label class="preview-filter-label">数据域
+                  <select id="data-preview-domain" aria-label="选择预览数据域">
+                    <option value="all">全部</option>
+                    <option value="market">报价 / 市场</option>
+                    <option value="technical">技术指标</option>
+                    <option value="macro">宏观数据</option>
+                    <option value="news">新闻事件</option>
+                  </select>
+                </label>
+              </div>
+              <div class="data-preview-tabs" id="data-preview-tabs" role="tablist" aria-label="数据域快捷筛选">
+                <button type="button" class="active" data-preview-domain="all">全部</button>
+                <button type="button" data-preview-domain="market">报价 / 市场</button>
+                <button type="button" data-preview-domain="technical">技术指标</button>
+                <button type="button" data-preview-domain="macro">宏观数据</button>
+                <button type="button" data-preview-domain="news">新闻事件</button>
+              </div>
+              <div class="data-preview-table-wrap" id="data-preview-table-wrap">
+                <div class="data-preview-empty">运行后可在这里查看实际数据行。</div>
+              </div>
+              <details class="preview-derived-details">
+                <summary>查看派生状态与原始数据 JSON（高级）</summary>
+                <pre id="data-preview-json">—</pre>
+              </details>
+            </section>
+            <details class="context-details">
+              <summary>查看 Evidence Context 原始 JSON（高级）</summary>
+              <pre id="context-json">—</pre>
+            </details>
+          </section>
+          <section class="view-panel report-panel hidden" id="report-view">
+            <div class="canvas-toolbar">
+              <div>
+                <h3>最终报告</h3>
+                <p>只读展示已通过验证的决策与研究报告。</p>
+              </div>
+              <button class="text-button" id="copy-report" type="button">复制可读报告</button>
+            </div>
+            <div class="report-result-grid">
+              <article><span>决策</span><strong id="report-decision">—</strong></article>
+              <article><span>置信度</span><strong id="report-confidence">—</strong></article>
+              <article><span>Evidence Context</span><strong id="report-context">—</strong></article>
+            </div>
+            <div class="report-view-content" id="report-view-content">
+              <div class="report-empty">运行完成后显示结构化报告。</div>
+            </div>
+            <details class="report-raw-details">
+              <summary>查看原始 Markdown（高级）</summary>
+              <pre id="report-raw-content">—</pre>
+            </details>
+          </section>
+          <section class="view-panel settings-page hidden" id="settings-view">
+            <div class="settings-page-head">
+              <span class="eyebrow">WORKSPACE / SETTINGS</span>
+              <h3>运行设置</h3>
+              <p>配置本地数据源和 LLM 接口。密钥只写入本机 <code>agent/.env</code>，页面不会回显原文。</p>
+            </div>
+            <div class="settings-grid">
+              <form class="settings-card" id="api-settings-form">
+                <div class="settings-card-head"><div><h4>LLM / API</h4><p>运行 Debate 的模型、端点和推理强度。</p></div><span id="api-settings-status">未读取</span></div>
+                <label>Provider<input id="setting-provider" type="text" placeholder="openai" /></label>
+                <label>Model<input id="setting-model" type="text" placeholder="gpt-5.6-terra" /></label>
+                <label>Base URL<input id="setting-base-url" type="url" placeholder="https://.../v1" /></label>
+                <label>API Key<input id="setting-api-key" type="password" placeholder="留空则保持现有密钥" autocomplete="new-password" /></label>
+                <label>Reasoning<select id="setting-reasoning"><option value="none">none（最低）</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+                <button class="settings-save" type="submit">保存 API 设置</button>
+              </form>
+              <form class="settings-card" id="data-settings-form">
+                <div class="settings-card-head"><div><h4>Data Source</h4><p>优先使用完整合成 Excel 验证链路，再切回数据库。</p></div><span id="data-settings-status">未读取</span></div>
+                <label>数据源<select id="setting-data-source"><option value="excel">Excel</option><option value="database">Database</option></select></label>
+                <label>Excel 路径<input id="setting-excel-path" type="text" placeholder="/absolute/path/workbook.xlsx" /></label>
+                <div class="settings-inline"><label>DB Host<input id="setting-db-host" type="text" placeholder="127.0.0.1" /></label><label>Port<input id="setting-db-port" type="number" placeholder="15433" /></label></div>
+                <div class="settings-inline"><label>DB Name<input id="setting-db-name" type="text" /></label><label>User<input id="setting-db-user" type="text" /></label></div>
+                <label>DB Password<input id="setting-db-password" type="password" placeholder="留空则保持现有密码" autocomplete="new-password" /></label>
+                <div class="settings-actions"><button class="secondary" id="use-synthetic-data" type="button">使用完整合成数据</button><button class="settings-save" type="submit">保存数据设置</button></div>
+              </form>
+            </div>
+            <div class="settings-note" id="settings-note">保存后重新执行健康检查；不会自动启动 Debate。</div>
+          </section>
+          <section class="event-pane">
+            <div class="event-header">
+              <span>时间</span>
+              <span>层级</span>
+              <span>Agent / 操作</span>
+              <span>状态</span>
+              <span>耗时</span>
+            </div>
+            <div class="event-feed empty" id="event-feed">
+              暂无事件
+            </div>
+          </section>
+
+          <div class="pane-splitter pane-splitter-horizontal" data-resize="center" role="separator" aria-label="调整事件流与详情区高度" tabindex="0"></div>
+
+          <section class="detail-pane">
+            <section class="diagnostics-panel hidden" id="diagnostics-panel" aria-live="polite">
+              <div class="diagnostics-head">
+                <div>
+                  <span class="eyebrow">RUN DIAGNOSTICS</span>
+                  <h3>故障诊断</h3>
+                  <p id="diagnostics-summary">校验失败会在这里按 Agent、阶段和证据路径归档。</p>
+                </div>
+                <button class="text-button" id="copy-diagnostics" type="button">复制诊断</button>
+              </div>
+              <div class="diagnostics-list" id="diagnostics-list"></div>
+            </section>
+            <div class="subhead">
+              <h3>输入 / 输出详情</h3>
+              <button class="text-button" id="copy-detail" type="button">复制</button>
+            </div>
+            <div class="detail-empty" id="detail-empty">点击一条事件查看完整数据</div>
+            <div class="event-detail hidden" id="event-detail">
+              <div class="detail-meta" id="detail-meta"></div>
+              <div class="artifact-cards" id="artifact-cards"></div>
+              <div class="io-grid">
+                <section>
+                  <h4>输入</h4>
+                  <div class="structured-input" id="detail-input-view">—</div>
+                  <details class="raw-input-details">
+                    <summary>查看原始输入 JSON（高级）</summary>
+                    <pre id="detail-input">—</pre>
+                  </details>
+                </section>
+                <section>
+                  <h4>输出 / 状态</h4>
+                  <div class="structured-output" id="detail-output-view">—</div>
+                  <details class="raw-output-details">
+                    <summary>查看原始输出 JSON（高级）</summary>
+                    <pre id="detail-output">—</pre>
+                  </details>
+                </section>
+              </div>
+              <details>
+                <summary>查看完整事件 JSON（高级）</summary>
+                <pre id="detail-json"></pre>
+              </details>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <div class="pane-splitter" data-resize="right" role="separator" aria-label="调整右侧面板宽度" tabindex="0"></div>
+
+      <aside class="sidebar agent-panel">
+        <section>
+          <div class="section-title">
+            <h2>Agent 状态</h2>
+            <span>5</span>
+          </div>
+          <div class="agent-list" id="agent-list"></div>
+        </section>
+
+        <section>
+          <h2>调用统计</h2>
+          <dl class="call-stats">
+            <div><dt>Agent</dt><dd id="stat-agent">0</dd></div>
+            <div><dt>Tool</dt><dd id="stat-tool">0</dd></div>
+            <div><dt>SDK</dt><dd id="stat-sdk">0</dd></div>
+            <div><dt>PostgreSQL</dt><dd id="stat-database">0</dd></div>
+            <div><dt>失败</dt><dd id="stat-failed">0</dd></div>
+          </dl>
+        </section>
+      </aside>
+    </main>
+
+    <form class="chat-composer" id="chat-form">
+      <div class="composer-context">
+        <span class="composer-label">研究请求</span>
+        <span class="composer-hint">Enter 发送 · Shift+Enter 换行</span>
+      </div>
+      <div class="composer-row">
+        <textarea id="chat-input" rows="1" placeholder="例如：分析 EUR/USD 未来两周走势，重点关注利率差、宏观数据和 4H/1D 技术状态"></textarea>
+        <button class="composer-send" id="chat-send" type="submit" aria-label="发送分析" title="发送分析">↑</button>
+      </div>
+    </form>
+
+    <dialog id="report-dialog">
+      <div class="dialog-head">
+        <h2>完整 Debate 报告</h2>
+        <button class="text-button" id="close-report" type="button">关闭</button>
+      </div>
+      <div class="report-dialog-readable" id="report-dialog-readable"></div>
+      <details class="report-raw-details">
+        <summary>查看原始 Markdown（高级）</summary>
+        <pre id="report-content">—</pre>
+      </details>
+    </dialog>
+  </body>
+</html>

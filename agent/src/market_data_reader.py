@@ -15,6 +15,7 @@ from datetime import date
 from typing import Any
 
 from src.market_database import MarketDatabaseClient
+from src.observability import observed_sdk
 
 # 这些取值与 Phase 2 的 public.frequency_enum 一致。先在 Tool 层报出清晰
 # 错误，避免把拼写错误静默变成一条空查询结果。
@@ -61,6 +62,7 @@ class MarketDataReader:
         """返回当前环境是否已显式配置并启用市场数据库。"""
         return bool(self._client.is_configured)
 
+    @observed_sdk("MarketDataReader.get_market_bars")
     def get_market_bars(
         self,
         symbol: Any,
@@ -114,6 +116,7 @@ class MarketDataReader:
         )
         return {"instrument": instrument, "bars": rows, "count": len(rows)}
 
+    @observed_sdk("MarketDataReader.get_latest_prices")
     def get_latest_prices(
         self,
         symbol: Any,
@@ -142,6 +145,7 @@ class MarketDataReader:
         )
         return {"instrument": instrument, "prices": rows, "count": len(rows)}
 
+    @observed_sdk("MarketDataReader.get_macro_observations")
     def get_macro_observations(
         self,
         symbol: Any,
@@ -206,6 +210,7 @@ class MarketDataReader:
             "count": len(rows),
         }
 
+    @observed_sdk("MarketDataReader.get_news")
     def get_news(
         self,
         symbol: Any,

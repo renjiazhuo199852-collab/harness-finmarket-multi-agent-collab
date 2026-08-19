@@ -9,6 +9,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
@@ -36,6 +37,21 @@ class SessionResponse(BaseModel):
     created_at: str
     updated_at: str
     last_attempt_id: Optional[str] = None
+    swarm_run_id: Optional[str] = None
+
+
+class SessionRunResponse(BaseModel):
+    """One canonical Swarm run launched from a Session attempt."""
+
+    run_id: str
+    session_id: str
+    attempt_id: Optional[str] = None
+    prompt: str = ""
+    preset: Optional[str] = None
+    status: str = "unknown"
+    created_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    variables: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SendMessageRequest(BaseModel):
@@ -324,6 +340,133 @@ def register_sessions_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         return svc, session
 
+    def _resolve_swarm_run_id(svc: Any, session: Any) -> Optional[str]:
+        """Resolve the canonical swarm run for a completed Session attempt.
+
+        Older AgentLoop attempts store the legacy ``agent/runs`` directory on
+        the attempt, while the FX Debate tool writes the canonical ``swarm-*``
+        id into the session tool-result record. Exposing that optional id lets
+        history views hydrate the same run details as a live SSE view.
+        """
+        try:
+            attempt_id = getattr(session, "last_attempt_id", None)
+            if not attempt_id:
+                return None
+            attempt = svc.store.get_attempt(session.session_id, attempt_id)
+            run_dir = str(getattr(attempt, "run_dir", "") or "")
+            if Path(run_dir).name.startswith("swarm-"):
+                return Path(run_dir).name
+            session_dir = svc.store._session_dir(session.session_id)
+            result_dir = Path(session_dir) / "tool-results"
+            if not result_dir.exists():
+                return None
+            candidates = sorted(
+                (path for path in result_dir.glob("*.txt") if path.is_file()),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            for path in candidates:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                matches = re.findall(r'"run_id"\s*:\s*"(swarm-[^"]+)"', text)
+                if matches:
+                    return matches[-1]
+        except (OSError, AttributeError, TypeError, ValueError):
+            return None
+        return None
+
+    def _session_display_status(svc: Any, session: Any) -> str:
+        """Return the user-facing status for a session history item.
+
+        Session records stay ``active`` for the lifetime of a conversation,
+        while each message execution has its own terminal Attempt status. The
+        history sidebar needs the latter so a finished or cancelled turn is
+        not shown as permanently running.
+        """
+        try:
+            attempt_id = getattr(session, "last_attempt_id", None)
+            if attempt_id:
+                attempt = svc.store.get_attempt(session.session_id, attempt_id)
+                attempt_status = getattr(getattr(attempt, "status", None), "value", None)
+                if attempt_status in {"pending", "running", "waiting_user"}:
+                    return "active"
+                if attempt_status in {"completed", "failed", "cancelled"}:
+                    return attempt_status
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+        return getattr(getattr(session, "status", None), "value", "active")
+
+    def _session_run_records(svc: Any, session: Any) -> List[SessionRunResponse]:
+        """Build a stable run index for a conversation.
+
+        Attempts are the ownership boundary. The tool-result directory is
+        retained as a compatibility fallback for records written before
+        ``Attempt.swarm_run_id`` existed.
+        """
+        attempts = list(svc.store.list_attempts(session.session_id, limit=100))
+        result_records: List[tuple[str, Dict[str, Any], float]] = []
+        result_dir = Path(svc.store._session_dir(session.session_id)) / "tool-results"
+        if result_dir.exists():
+            for path in sorted(result_dir.glob("*.txt"), key=lambda item: item.stat().st_mtime):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                run_id = payload.get("run_id")
+                if isinstance(run_id, str) and run_id.startswith("swarm-"):
+                    result_records.append((run_id, payload, path.stat().st_mtime))
+
+        # A run id normally lives on its Attempt. For older records, associate
+        # a result file with the nearest completed attempt, then fall back to
+        # chronological order. This keeps historical sessions readable while
+        # new runs are lossless.
+        assignments: Dict[str, tuple[Any, Dict[str, Any]]] = {}
+        claimed: set[str] = set()
+        for attempt in attempts:
+            run_id = getattr(attempt, "swarm_run_id", None)
+            if not run_id:
+                run_dir = Path(str(getattr(attempt, "run_dir", "") or ""))
+                run_id = run_dir.name if run_dir.name.startswith("swarm-") else None
+            payload: Dict[str, Any] = {}
+            if not run_id:
+                candidates = [item for item in result_records if item[0] not in claimed]
+                if candidates:
+                    # Completion times are more reliable than directory scan
+                    # order when two attempts finish close together.
+                    candidate = candidates[0]
+                    run_id, payload = candidate[0], candidate[1]
+                    claimed.add(run_id)
+            else:
+                for candidate_id, candidate_payload, _mtime in result_records:
+                    if candidate_id == run_id:
+                        payload = candidate_payload
+                        claimed.add(candidate_id)
+                        break
+            if run_id:
+                assignments[run_id] = (attempt, payload)
+
+        for run_id, payload, _mtime in result_records:
+            if run_id not in assignments:
+                assignments[run_id] = (None, payload)
+
+        records: List[SessionRunResponse] = []
+        for run_id, (attempt, payload) in assignments.items():
+            attempt_status = getattr(getattr(attempt, "status", None), "value", None) if attempt else None
+            records.append(SessionRunResponse(
+                run_id=run_id,
+                session_id=session.session_id,
+                attempt_id=getattr(attempt, "attempt_id", None),
+                prompt=getattr(attempt, "prompt", "") or "",
+                preset=payload.get("preset") if isinstance(payload.get("preset"), str) else "fx_debate_team",
+                status=attempt_status or str(payload.get("status") or "unknown"),
+                created_at=getattr(attempt, "created_at", None),
+                completed_at=getattr(attempt, "completed_at", None),
+                variables=payload.get("user_vars") if isinstance(payload.get("user_vars"), dict) else {},
+            ))
+        records.sort(key=lambda record: record.created_at or "")
+        return records
+
     # -----------------------------------------------------------------------
     # Session CRUD routes
     # -----------------------------------------------------------------------
@@ -338,10 +481,11 @@ def register_sessions_routes(app: FastAPI) -> None:
         return SessionResponse(
             session_id=session.session_id,
             title=session.title,
-            status=session.status.value,
+            status=_session_display_status(svc, session),
             created_at=session.created_at,
             updated_at=session.updated_at,
             last_attempt_id=session.last_attempt_id,
+            swarm_run_id=_resolve_swarm_run_id(svc, session),
         )
 
     @app.get("/sessions", response_model=List[SessionResponse], dependencies=[Depends(require_auth)])
@@ -355,10 +499,11 @@ def register_sessions_routes(app: FastAPI) -> None:
             SessionResponse(
                 session_id=s.session_id,
                 title=s.title,
-                status=s.status.value,
+                status=_session_display_status(svc, s),
                 created_at=s.created_at,
                 updated_at=s.updated_at,
                 last_attempt_id=s.last_attempt_id,
+                swarm_run_id=_resolve_swarm_run_id(svc, s),
             )
             for s in sessions
         ]
@@ -376,11 +521,24 @@ def register_sessions_routes(app: FastAPI) -> None:
         return SessionResponse(
             session_id=session.session_id,
             title=session.title,
-            status=session.status.value,
+            status=_session_display_status(svc, session),
             created_at=session.created_at,
             updated_at=session.updated_at,
             last_attempt_id=session.last_attempt_id,
+            swarm_run_id=_resolve_swarm_run_id(svc, session),
         )
+
+    @app.get("/sessions/{session_id}/runs", response_model=List[SessionRunResponse], dependencies=[Depends(require_auth)])
+    async def list_session_runs(session_id: str, limit: int = Query(50, ge=1, le=200)):
+        """List all Swarm runs launched in this Session, oldest first."""
+        _host_validate_path_param(session_id, "session_id")
+        svc = _host_get_session_service()
+        if not svc:
+            raise HTTPException(status_code=501, detail="Session runtime not enabled")
+        session = svc.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        return _session_run_records(svc, session)[-limit:]
 
     # -----------------------------------------------------------------------
     # Goal sub-group routes

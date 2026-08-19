@@ -25,8 +25,11 @@ def _dedupe_finish_reason(raw: str) -> str:
     canonical suffix so ReAct equality checks survive.
     """
     return next(
-        (m for m in ("tool_calls", "function_call", "content_filter", "length", "stop")
-         if raw.endswith(m)),
+        (
+            m
+            for m in ("tool_calls", "function_call", "content_filter", "length", "stop")
+            if raw.endswith(m)
+        ),
         raw,
     )
 
@@ -86,6 +89,8 @@ class LLMResponse:
         content_filter_triggered: ``True`` when the provider blocked the
             response via content moderation (e.g. DashScope/Qwen content
             moderation filter, ``finish_reason == "content_filter"``).
+        provider_state: Opaque continuation data that must be replayed to the
+            same provider on the next turn.
     """
 
     content: Optional[str] = None
@@ -94,6 +99,7 @@ class LLMResponse:
     finish_reason: str = "stop"
     usage_metadata: Optional[Dict[str, int]] = None
     content_filter_triggered: bool = False
+    provider_state: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_tool_calls(self) -> bool:
@@ -207,7 +213,10 @@ def _is_possible_dsml_tool_call_prefix(content: str) -> bool:
     compact = re.sub(r"\s+", "", content.lstrip()[:80]).lower()
     if not compact:
         return True
-    return any(prefix.startswith(compact) or compact.startswith(prefix) for prefix in _DSML_PREFIXES)
+    return any(
+        prefix.startswith(compact) or compact.startswith(prefix)
+        for prefix in _DSML_PREFIXES
+    )
 
 
 def _parse_dsml_tool_calls(content: Any) -> list[ToolCallRequest]:
@@ -274,7 +283,12 @@ class ChatLLM:
         self.model_name = model_name
         self._llm = build_llm(model_name=model_name)
 
-    def chat(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None, timeout: Optional[int] = None) -> LLMResponse:
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        timeout: Optional[int] = None,
+    ) -> LLMResponse:
         """Call the LLM synchronously.
 
         Args:
@@ -341,7 +355,9 @@ class ChatLLM:
                             pending_text = ""
                     else:
                         on_text_chunk(chunk_text)
-                reasoning = getattr(chunk, "additional_kwargs", {}).get("reasoning_content")
+                reasoning = getattr(chunk, "additional_kwargs", {}).get(
+                    "reasoning_content"
+                )
                 if reasoning and not chunk.content and on_reasoning_chunk:
                     on_reasoning_chunk(reasoning)
                 accumulated = chunk if accumulated is None else accumulated + chunk
@@ -356,7 +372,21 @@ class ChatLLM:
                 )
                 return self.chat(messages, tools=tools, timeout=timeout)
             response = self._parse_response(accumulated)
-            if pending_text and not (response.has_tool_calls and response.content == ""):
+            # A few OpenAI-compatible gateways (including SiliconFlow's GLM
+            # reasoning endpoint) emit ``finish_reason=tool_calls`` while the
+            # streamed tool-call delta is only a partial shell.  Sending that
+            # response to AgentLoop would make it append a blank turn and skip
+            # the tool.  The same endpoint's non-streaming response contains
+            # the complete native call, so retry once through ``chat``.
+            if tools and response.finish_reason == "tool_calls" and not response.tool_calls:
+                logger.warning(
+                    "Provider streamed an incomplete tool call; retrying "
+                    "with a non-streaming request"
+                )
+                return self.chat(messages, tools=tools, timeout=timeout)
+            if pending_text and not (
+                response.has_tool_calls and response.content == ""
+            ):
                 on_text_chunk(pending_text)
             return response
         except Exception as exc:
@@ -371,11 +401,17 @@ class ChatLLM:
                 return self.chat(messages, tools=tools, timeout=timeout)
             _cfg = get_env_config()
             provider = _cfg.llm.langchain_provider.strip().lower() or "openai"
-            model = self.model_name or _cfg.llm.langchain_model_name.strip() or "(unset)"
-            raise ProviderStreamError(provider=provider, model=model, original=exc) from exc
+            model = (
+                self.model_name or _cfg.llm.langchain_model_name.strip() or "(unset)"
+            )
+            raise ProviderStreamError(
+                provider=provider, model=model, original=exc
+            ) from exc
 
     @staticmethod
-    def _tool_call_thought_signature_maps(ai_message: Any) -> tuple[dict[str, str], dict[int, str]]:
+    def _tool_call_thought_signature_maps(
+        ai_message: Any,
+    ) -> tuple[dict[str, str], dict[int, str]]:
         """Return Gemini thought signatures captured by ``ChatOpenAIWithReasoning``."""
         by_id: dict[str, str] = {}
         by_index: dict[int, str] = {}
@@ -467,15 +503,13 @@ class ChatLLM:
         finish_reason = (
             "tool_calls"
             if dsml_tool_calls
-            else "tool_calls"
-            if raw_finish_reason == "tool_use"
-            else _dedupe_finish_reason(
-                raw_finish_reason
+            else (
+                "tool_calls"
+                if raw_finish_reason == "tool_use"
+                else _dedupe_finish_reason(raw_finish_reason)
             )
         )
-        content_filter_triggered = is_content_filter_triggered(
-            raw_finish_reason
-        )
+        content_filter_triggered = is_content_filter_triggered(raw_finish_reason)
 
         return LLMResponse(
             content="" if dsml_tool_calls else content,
@@ -484,6 +518,15 @@ class ChatLLM:
             finish_reason=finish_reason,
             usage_metadata=usage,
             content_filter_triggered=content_filter_triggered,
+            provider_state=(
+                {
+                    "responses_output_items": list(
+                        additional_kwargs.get("responses_output_items") or []
+                    )
+                }
+                if additional_kwargs.get("responses_output_items")
+                else {}
+            ),
         )
 
 

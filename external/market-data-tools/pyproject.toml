@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "icbc-trading-portable-ai-search"
+version = "1.0.0"
+description = "可移植的 ICBC Trading AI Search 五工具服务"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+    "psycopg2-binary>=2.9,<3.0",
+    "python-dotenv>=1.0,<2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*"]
+
+[tool.pytest.ini_options]
+# legacy_tests 依赖原始 ICBC-trading-ai_search 路径；可移植项目的正式测试位于 tests。
+testpaths = ["tests"]

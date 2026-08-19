@@ -17,7 +17,7 @@ from concurrent.futures import (
 )
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from src.config.accessor import get_env_config
 from src.config.schema import AgentConfig
@@ -44,6 +44,24 @@ from src.tools.redaction import redact_internal_paths
 from src.swarm.worker import run_worker
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_template_vars(run: SwarmRun) -> dict[str, str]:
+    """Return public vars plus the narrow runtime-owned FX injection set."""
+    variables = dict(run.user_vars)
+    if run.preset_name != "fx_debate_team":
+        return variables
+    trusted = run.trusted_context or {}
+    for key in (
+        "resolved_request_json",
+        "evidence_context_json",
+        "evidence_context_id",
+    ):
+        value = trusted.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"FX Debate trusted_context is missing {key}")
+        variables[key] = value
+    return variables
 
 
 class SwarmRuntime:
@@ -89,6 +107,7 @@ class SwarmRuntime:
         user_vars: dict[str, str],
         live_callback: Callable | None = None,
         include_shell_tools: bool = False,
+        trusted_context: dict[str, Any] | None = None,
     ) -> SwarmRun:
         """Start a swarm run. Returns immediately, execution happens in background.
 
@@ -97,6 +116,9 @@ class SwarmRuntime:
             user_vars: User-provided variables for prompt templates.
             live_callback: Optional callback invoked for each event in real-time.
             include_shell_tools: Whether workers may register shell tools.
+            trusted_context: Runtime-owned data injected into workers only by
+                this runtime. It is persisted separately from ``user_vars``
+                and is never accepted from generic Swarm callers.
 
         Returns:
             The created SwarmRun instance (status=pending initially).
@@ -117,6 +139,7 @@ class SwarmRuntime:
             logger.warning("Stale-run reaper failed", exc_info=True)
 
         run = build_run_from_preset(preset_name, user_vars)
+        run.trusted_context = trusted_context
         validate_dag(run.tasks)
 
         # Capture which provider/model the run was launched against so the
@@ -411,6 +434,12 @@ class SwarmRuntime:
 
     def _prefetch_grounding_data(self, run: SwarmRun) -> None:
         """Fetch run-level grounding data without blocking ``start_run``."""
+        # FX Debate has a stricter trust boundary than generic research presets:
+        # every fact must come from 韦庆檑's internal PostgreSQL SDK and be
+        # registered as run-scoped evidence. Generic external grounding would
+        # silently mix another provider into the same prompt.
+        if run.preset_name == "fx_debate_team":
+            return
         symbols = grounding.extract_symbols_from_user_vars(run.user_vars)
         if not symbols:
             return
@@ -575,12 +604,13 @@ class SwarmRuntime:
                     if source_task_id in task_summaries:
                         upstream[context_key] = task_summaries[source_task_id]
 
+                worker_vars = _worker_template_vars(run)
                 future = executor.submit(
                     self._run_worker_with_retries,
                     agent_spec=agent_spec,
                     task=task,
                     upstream_summaries=upstream,
-                    user_vars=run.user_vars,
+                    user_vars=worker_vars,
                     run_dir=run_dir,
                     event_callback=_event_callback,
                     run_id=run.id,

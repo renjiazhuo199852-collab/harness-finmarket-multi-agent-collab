@@ -16,6 +16,7 @@ from typing import Any
 
 from src.config.accessor import get_env_config
 from src.config.env_schema import MarketDatabaseConfig
+from src.observability import observation_span
 
 
 class MarketDatabaseUnavailable(RuntimeError):
@@ -88,8 +89,12 @@ class MarketDatabaseClient:
                     f"-c statement_timeout={self._config.statement_timeout_ms}"
                 ),
             )
-        except Exception as exc:  # noqa: BLE001 - convert driver details to one stable domain error
-            raise MarketDatabaseUnavailable(f"market database connection failed: {exc}") from exc
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - convert driver details to one stable domain error
+            raise MarketDatabaseUnavailable(
+                f"market database connection failed: {exc}"
+            ) from exc
 
         try:
             yield connection
@@ -109,11 +114,32 @@ class MarketDatabaseClient:
             Rows mapped from selected column names to native Python values.
             Tool-specific output code is responsible for JSON serialization.
         """
-        with self.read_only_connection() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(query, tuple(params))
-                columns = [column.name for column in cursor.description or ()]
-                return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+        trace_input = {
+            "sql": " ".join(query.split()),
+            "params": list(params),
+        }
+        with observation_span(
+            "database_query",
+            "MarketDatabaseClient.fetch_all",
+            trace_input,
+        ) as span:
+            with self.read_only_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(query, tuple(params))
+                    columns = [column.name for column in cursor.description or ()]
+                    rows = [
+                        dict(zip(columns, row, strict=True))
+                        for row in cursor.fetchall()
+                    ]
+            span.set_output(
+                {
+                    "row_count": len(rows),
+                    "columns": columns,
+                    "rows": rows[:5],
+                    "truncated": len(rows) > 5,
+                }
+            )
+            return rows
 
     @staticmethod
     def _load_psycopg_connect() -> ConnectionFactory:

@@ -1,0 +1,20 @@
+# 本地配置包含数据库密码和模型 API Key，严禁提交。
+.env
+.env.*
+!.env.example
+
+# Python 运行产物。
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# 前端依赖和构建产物。
+front/node_modules/
+front/dist/
+front/.vite/
+
+# 本地日志和临时导出文件。
+*.log
+database/pg_dump.sql

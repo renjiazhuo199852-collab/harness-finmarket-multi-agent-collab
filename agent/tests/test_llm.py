@@ -13,7 +13,7 @@ from src.providers.capabilities import (
     get_provider_capabilities,
     provider_env_names,
 )
-from src.providers.llm import _sync_provider_env, build_llm
+from src.providers.llm import _normalize_no_proxy_ipv6, _sync_provider_env, build_llm
 
 
 class TestProviderCapabilityAliases:
@@ -190,6 +190,19 @@ class TestSyncProviderEnv:
         )
         assert result["OPENAI_API_KEY"] == "ds-key-123"
         assert result["OPENAI_API_BASE"] == "https://api.deepseek.com/v1"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("localhost,::1,127.0.0.1", "localhost,127.0.0.1"),
+            ("::1/128", ""),
+            ("[::1],localhost", "localhost"),
+        ],
+    )
+    def test_no_proxy_ipv6_is_normalized_for_httpx(
+        self, raw: str, expected: str
+    ) -> None:
+        assert _normalize_no_proxy_ipv6(raw) == expected
 
     @pytest.mark.parametrize(
         ("provider", "key_env", "base_env", "base_url"),

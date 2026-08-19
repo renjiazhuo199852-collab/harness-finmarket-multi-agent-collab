@@ -227,6 +227,29 @@ class SessionStore:
             return None
         return Attempt.from_dict(data)
 
+    def list_attempts(self, session_id: str, limit: int = 100) -> List[Attempt]:
+        """List attempts for a session in chronological order.
+
+        Missing or corrupt attempt records are ignored so one incomplete
+        background run cannot hide the rest of a conversation's history.
+        """
+        attempts_dir = self._session_dir(session_id) / "attempts"
+        if not attempts_dir.exists():
+            return []
+        attempts: List[Attempt] = []
+        for attempt_dir in attempts_dir.iterdir():
+            if not attempt_dir.is_dir():
+                continue
+            data = self._read_json(attempt_dir / "attempt.json")
+            if not isinstance(data, dict):
+                continue
+            try:
+                attempts.append(Attempt.from_dict(data))
+            except (TypeError, ValueError, KeyError) as exc:
+                logger.warning("Skipping corrupt attempt record in %s: %s", attempt_dir, exc)
+        attempts.sort(key=lambda attempt: attempt.created_at)
+        return attempts[-limit:]
+
     def update_attempt(self, attempt: Attempt) -> None:
         """Update an execution attempt.
 

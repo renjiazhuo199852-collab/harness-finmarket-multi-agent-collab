@@ -120,6 +120,10 @@ _OPENAI_CODEX_CAPABILITIES = ProviderCapabilities(
 
 _PROVIDERS: dict[str, ProviderCapabilities] = {
     "openai": ProviderCapabilities("openai", "OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    # User-managed OpenAI-compatible gateways use the same wire protocol as
+    # OpenAI, but keep their credentials in a separate namespace so switching
+    # providers does not overwrite the official OpenAI configuration.
+    "custom": ProviderCapabilities("custom", "CUSTOM_API_KEY", "CUSTOM_BASE_URL"),
     "anthropic": ProviderCapabilities(
         "anthropic",
         "ANTHROPIC_API_KEY",
@@ -275,7 +279,7 @@ def _provider_default_base_urls() -> dict[str, str]:
             continue
         name = str(entry.get("name", "")).strip().lower()
         url = str(entry.get("default_base_url", "")).strip()
-        if name and url:
+        if name:
             result[name] = url
     return result
 

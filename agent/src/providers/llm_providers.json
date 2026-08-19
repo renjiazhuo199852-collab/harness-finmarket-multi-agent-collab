@@ -27,6 +27,15 @@
     "api_key_required": true
   },
   {
+    "name": "custom",
+    "label": "自定义 OpenAI-compatible API",
+    "api_key_env": "CUSTOM_API_KEY",
+    "base_url_env": "CUSTOM_BASE_URL",
+    "default_model": "",
+    "default_base_url": "",
+    "api_key_required": false
+  },
+  {
     "name": "anthropic",
     "label": "Anthropic / Messages API Proxy",
     "api_key_env": "ANTHROPIC_API_KEY",

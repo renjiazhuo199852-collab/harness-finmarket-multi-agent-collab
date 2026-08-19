@@ -96,6 +96,9 @@ Decide which workflow to use based on the request:
 
 **Analysis / research** — user wants factor analysis, options pricing, market data, or general research:
 - Load the relevant skill first, then use the matching tool (factor_analysis, options_pricing, bash for custom scripts).
+- For a direct natural-language FX data request, use `query_fx_data` when it is available; it
+  is the controlled gateway to the independent data-search service and returns structured
+  price, bar, macro, or news data. Do not write SQL or guess the provider's table names.
 
 **Document / web** — user provides a PDF or URL:
 - `read_document(path=...)` for PDFs, `read_url(url=...)` for web pages.
@@ -148,9 +151,13 @@ class ContextBuilder:
         skills_loader: Skills loader.
     """
 
-    def __init__(self, registry: ToolRegistry, memory: WorkspaceMemory,
-                 skills_loader: Optional[SkillsLoader] = None,
-                 persistent_memory: Optional[PersistentMemory] = None) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        memory: WorkspaceMemory,
+        skills_loader: Optional[SkillsLoader] = None,
+        persistent_memory: Optional[PersistentMemory] = None,
+    ) -> None:
         """Initialize ContextBuilder.
 
         Args:
@@ -212,7 +219,9 @@ class ContextBuilder:
         except Exception:  # noqa: BLE001 - prompt count must never break startup
             return 18
 
-    def build_messages(self, user_message: str, history: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    def build_messages(
+        self, user_message: str, history: Optional[List[Dict[str, Any]]] = None
+    ) -> List[Dict[str, Any]]:
         """Build full message list.
 
         Auto-recalls relevant persistent memories and injects them into the
@@ -236,9 +245,14 @@ class ContextBuilder:
         enriched = user_message
         if self._persistent_memory:
             try:
-                recalls = self._persistent_memory.find_relevant(user_message, max_results=3)
+                recalls = self._persistent_memory.find_relevant(
+                    user_message, max_results=3
+                )
                 if recalls:
-                    lines = [f"- **{r.title}** ({r.memory_type}): {r.body[:500]}" for r in recalls]
+                    lines = [
+                        f"- **{r.title}** ({r.memory_type}): {r.body[:500]}"
+                        for r in recalls
+                    ]
                     recall_block = "\n".join(lines)
                     enriched = (
                         f"<recalled-memories>\n{recall_block}\n</recalled-memories>\n\n"
@@ -259,13 +273,19 @@ class ContextBuilder:
             param_parts = []
             for pname, pschema in params.items():
                 req = " (required)" if pname in required else ""
-                param_parts.append(f"    - {pname}: {pschema.get('description', pschema.get('type', ''))}{req}")
+                param_parts.append(
+                    f"    - {pname}: {pschema.get('description', pschema.get('type', ''))}{req}"
+                )
             param_text = "\n".join(param_parts) if param_parts else "    (no params)"
-            lines.append(f"### {tool.name}\n{tool.description}\n  Params:\n{param_text}")
+            lines.append(
+                f"### {tool.name}\n{tool.description}\n  Params:\n{param_text}"
+            )
         return "\n\n".join(lines)
 
     @staticmethod
-    def format_tool_result(tool_call_id: str, tool_name: str, result: str) -> Dict[str, Any]:
+    def format_tool_result(
+        tool_call_id: str, tool_name: str, result: str
+    ) -> Dict[str, Any]:
         """Format a tool execution result as a message."""
         return {
             "role": "tool",
@@ -279,6 +299,7 @@ class ContextBuilder:
         tool_calls: list,
         content: Optional[str] = None,
         reasoning_content: Optional[str] = None,
+        provider_state: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Format an assistant tool_calls message, preserving thinking text.
 
@@ -289,6 +310,8 @@ class ContextBuilder:
             reasoning_content: Provider-specific reasoning field (Kimi K2.5,
                 DeepSeek reasoner, Qwen thinking). Only attached to the output
                 message when not None, so non-thinking providers see no change.
+            provider_state: Opaque continuation data for replaying provider
+                output items, such as encrypted Responses reasoning state.
 
         Returns:
             OpenAI-format assistant message.
@@ -321,4 +344,6 @@ class ContextBuilder:
             }
         if reasoning_content is not None:
             message["reasoning_content"] = reasoning_content
+        if provider_state:
+            message["provider_state"] = copy.deepcopy(provider_state)
         return message

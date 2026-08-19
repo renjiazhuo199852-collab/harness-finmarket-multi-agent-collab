@@ -1,0 +1,715 @@
+"""Specialized entry Tool for the five-Agent, frozen-bundle FX Debate."""
+
+from __future__ import annotations
+
+import json
+import re
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Protocol
+
+from pydantic import ValidationError
+
+from src.agent.tools import BaseTool
+from src.fx_debate.context import build_evidence_context
+from src.fx_debate.contracts import (
+    FinalDecision,
+    FrontAgentOutput,
+    HypothesisArgumentV2,
+    RelativeStateV2,
+    RiskReview,
+)
+from src.fx_debate.data_query_agent import FxDataServiceError
+from src.fx_debate.evidence_factory import EvidenceBundle, FxEvidenceFactory
+from src.fx_debate.evidence_sources import (
+    AiSearchFxEvidenceSource,
+    ExcelFxEvidenceSource,
+    FxEvidenceSource,
+    ReaderFxEvidenceSource,
+)
+from src.fx_debate.models import (
+    EvidenceContext,
+    ResolvedFxDebateRequest,
+    RunOptions,
+)
+from src.fx_debate.request_adapter import (
+    FxPairDebateRequest,
+    adapt_fx_pair_debate_request,
+)
+from src.fx_debate.store import FxEvidenceStore
+from src.market_data_reader import MarketDataReader
+from src.tools.validate_fx_output_tool import ValidateFxOutputTool
+
+_JSON_FENCE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+FxDebateEventCallback = Callable[[dict[str, Any]], None]
+SessionEventCallback = Callable[[str, dict[str, Any]], None]
+CancelChecker = Callable[[], bool]
+_PREVIEW_LIMITS = {"market": 40, "technical": 36, "macro": 24, "news": 24}
+
+
+def adapt_fx_debate_event_callback(
+    callback: SessionEventCallback | None,
+) -> FxDebateEventCallback | None:
+    """Adapt one-argument FX events to the Session/SSE callback contract."""
+    if callback is None:
+        return None
+
+    def forward(event: dict[str, Any]) -> None:
+        payload = event if isinstance(event, dict) else {"value": str(event)}
+        if payload.get("type") == "context_ready":
+            callback("fx_debate.context_ready", payload)
+            return
+        if payload.get("type") == "swarm_started":
+            callback(
+                "swarm.started",
+                {key: value for key, value in payload.items() if key != "type"},
+            )
+            return
+        callback(
+            "swarm.event",
+            {
+                "run_id": payload.get("run_id"),
+                "event": payload,
+            },
+        )
+
+    return forward
+
+
+@dataclass(frozen=True)
+class FxDebateExecution:
+    """Materialized Swarm result needed for deterministic final validation."""
+
+    run_id: str
+    status: str
+    final_report: str
+    task_outputs: dict[str, str]
+    run_root: Path
+
+
+class FxDebateOrchestrator(Protocol):
+    """Small orchestration seam around the existing Swarm runtime."""
+
+    def run(
+        self,
+        *,
+        preset_name: str,
+        user_vars: dict[str, str],
+        context: EvidenceContext,
+        bundle: EvidenceBundle,
+        event_callback: FxDebateEventCallback | None = None,
+        cancel_checker: CancelChecker | None = None,
+    ) -> FxDebateExecution:
+        """Start, await, and materialize one Swarm execution."""
+
+
+class DefaultFxDebateOrchestrator:
+    """Use the repository's existing asynchronous Swarm runtime."""
+
+    def run(
+        self,
+        *,
+        preset_name: str,
+        user_vars: dict[str, str],
+        context: EvidenceContext,
+        bundle: EvidenceBundle,
+        event_callback: FxDebateEventCallback | None = None,
+        cancel_checker: CancelChecker | None = None,
+    ) -> FxDebateExecution:
+        from src.config import load_swarm_agent_config
+        from src.config.accessor import get_env_config
+        from src.swarm.runtime import SwarmRuntime
+        from src.swarm.store import SwarmStore, swarm_runs_root
+
+        base_dir = swarm_runs_root()
+        base_dir.mkdir(parents=True, exist_ok=True)
+        store = SwarmStore(base_dir=base_dir)
+        config = get_env_config()
+        runtime = SwarmRuntime(
+            store=store,
+            max_workers=config.swarm.swarm_max_workers,
+            agent_config=load_swarm_agent_config(),
+        )
+
+        pending_live_events: list[dict[str, Any]] = []
+        run_id_holder: dict[str, str | None] = {"run_id": None}
+        event_lock = threading.Lock()
+
+        def forward_event(event: Any) -> None:
+            if event_callback is None:
+                return
+            if hasattr(event, "model_dump"):
+                payload = event.model_dump(mode="json")
+            elif isinstance(event, dict):
+                payload = dict(event)
+            else:
+                return
+            with event_lock:
+                run_id = run_id_holder["run_id"]
+                if run_id is None:
+                    pending_live_events.append(payload)
+                    return
+                event_callback({**payload, "run_id": run_id})
+
+        # Keep the handoff's three public variables visible to the Swarm run;
+        # resolved identity and evidence scope are system-injected variables,
+        # never values that an Agent can rewrite.
+        trusted_context = {
+            "resolved_request_json": context_request_json(user_vars, context),
+            "evidence_context_json": context.model_dump_json(),
+            "evidence_context_id": context.evidence_context_id,
+            "evidence_bundle_json": bundle.model_dump_json(),
+        }
+        run = runtime.start_run(
+            preset_name,
+            user_vars,
+            live_callback=forward_event if event_callback is not None else None,
+            include_shell_tools=False,
+            trusted_context=trusted_context,
+        )
+        with event_lock:
+            run_id_holder["run_id"] = run.id
+            if event_callback is not None:
+                event_callback(
+                    {
+                        "type": "swarm_started",
+                        "run_id": run.id,
+                        "preset": preset_name,
+                        "variables": user_vars,
+                        "status": "running",
+                        "agents": [agent.model_dump(mode="json") for agent in run.agents],
+                        "tasks": [task.model_dump(mode="json") for task in run.tasks],
+                    }
+                )
+                for payload in pending_live_events:
+                    event_callback({**payload, "run_id": run.id})
+                pending_live_events.clear()
+        if cancel_checker is not None and cancel_checker():
+            runtime.cancel_run(run.id)
+            return FxDebateExecution(
+                run_id=run.id,
+                status="cancelled",
+                final_report="",
+                task_outputs={},
+                run_root=store.run_dir(run.id),
+            )
+        deadline = time.monotonic() + max(1, config.swarm.swarm_timeout)
+        loaded = run
+        while time.monotonic() < deadline:
+            candidate = store.load_run(run.id)
+            if candidate is not None:
+                loaded = candidate
+                if loaded.status.value in _TERMINAL_STATUSES:
+                    break
+            if cancel_checker is not None and cancel_checker():
+                runtime.cancel_run(run.id)
+                return FxDebateExecution(
+                    run_id=run.id,
+                    status="cancelled",
+                    final_report="",
+                    task_outputs={},
+                    run_root=store.run_dir(run.id),
+                )
+            time.sleep(0.25)
+        else:
+            runtime.cancel_run(run.id)
+            return FxDebateExecution(
+                run_id=run.id,
+                status="timeout",
+                final_report="",
+                task_outputs={},
+                run_root=store.run_dir(run.id),
+            )
+
+        return FxDebateExecution(
+            run_id=loaded.id,
+            status=loaded.status.value,
+            final_report=loaded.final_report or "",
+            task_outputs={
+                task.id: task.summary or ""
+                for task in loaded.tasks
+                if task.summary is not None
+            },
+            run_root=store.run_dir(loaded.id),
+        )
+
+
+class RunFxDebateTool(BaseTool):
+    """Launch and strictly validate the multi-pair FX Debate workflow."""
+
+    name = "run_fx_debate"
+    description = (
+        "接收 Planner 的 target、timeframe、goal 三变量，内部解析现货外汇请求并创建不可变 Evidence Context，"
+        "启动五 Agent Debate，并返回经证据和风控校验的结构化决策与中文报告。"
+        "数据来自运行前冻结的 Excel、MarketDataReader 或独立 AI Search 服务证据包；不会回退到外部行情。"
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "target": {
+                "type": "string",
+                "description": "外汇货币对，例如 EURUSD、EUR/USD 或 EUR-USD。",
+            },
+            "timeframe": {
+                "type": "string",
+                "description": "例如 '2 weeks; 4H/1D'。",
+            },
+            "goal": {
+                "type": "string",
+                "description": "完整研究目标和约束。",
+            },
+            "run_options": {
+                "type": "object",
+                "description": "可选 request_id、as_of、risk_profile、language。",
+            },
+        },
+        "required": ["target", "timeframe", "goal"],
+    }
+    is_readonly = False
+    repeatable = True
+
+    def __init__(
+        self,
+        *,
+        orchestrator: FxDebateOrchestrator | None = None,
+        event_callback: FxDebateEventCallback | None = None,
+        evidence_source: FxEvidenceSource | None = None,
+        evidence_factory: FxEvidenceFactory | None = None,
+        cancel_checker: CancelChecker | None = None,
+    ) -> None:
+        self._orchestrator = orchestrator or DefaultFxDebateOrchestrator()
+        self._event_callback = event_callback
+        self._evidence_source = evidence_source
+        self._evidence_factory = evidence_factory or FxEvidenceFactory()
+        self._cancel_checker = cancel_checker
+
+    @classmethod
+    def check_available(cls) -> bool:
+        """Advertise when the selected operator-owned source is configured."""
+        from src.config.accessor import get_env_config
+
+        config = get_env_config()
+        if config.fx_debate.data_source == "excel":
+            return bool(
+                config.fx_debate.excel_path
+                and Path(config.fx_debate.excel_path).expanduser().is_file()
+            )
+        if config.fx_debate.data_source == "ai_search":
+            return bool(
+                config.fx_debate.data_service_url
+                and config.fx_debate.data_service_url.startswith(("http://", "https://"))
+            )
+        return MarketDataReader().is_configured
+
+    def execute(self, **kwargs: Any) -> str:
+        """Validate Planner input, run the DAG, and enforce the final gate."""
+        try:
+            has_public = any(key in kwargs for key in ("target", "timeframe", "goal"))
+            has_resolved = kwargs.get("resolved_request") is not None
+            if has_public and has_resolved:
+                raise ValueError(
+                    "AMBIGUOUS_INPUT: target/timeframe/goal 与 resolved_request 不能同时提供"
+                )
+            if has_public:
+                public_request = FxPairDebateRequest.model_validate(
+                    {
+                        "target": kwargs.get("target"),
+                        "timeframe": kwargs.get("timeframe"),
+                        "goal": kwargs.get("goal"),
+                    }
+                )
+                adapted = adapt_fx_pair_debate_request(public_request)
+                request = adapted.resolved_request
+                public_vars = {
+                    "target": public_request.target,
+                    "timeframe": public_request.timeframe,
+                    "goal": public_request.goal,
+                }
+            else:
+                request = ResolvedFxDebateRequest.model_validate(
+                    _json_object(kwargs.get("resolved_request"), "resolved_request")
+                )
+                public_vars = {
+                    "target": request.display_symbol,
+                    "timeframe": f"{request.horizon}; {request.timeframe}",
+                    "goal": "按 Planner 已解析请求执行 FX Debate。",
+                }
+            options = RunOptions.model_validate(
+                _json_object(kwargs.get("run_options") or {}, "run_options")
+            )
+            context = build_evidence_context(request, options)
+            source = self._evidence_source or _configured_evidence_source(
+                trace_callback=self._event_callback
+            )
+            bundle = self._evidence_factory.build(context, source)
+            data_preview = build_evidence_preview(bundle)
+            if self._event_callback is not None:
+                self._event_callback(
+                    {
+                        "type": "context_ready",
+                        "agent_id": None,
+                        "task_id": None,
+                        "data": {
+                            "evidence_context_id": context.evidence_context_id,
+                            "as_of": context.as_of.isoformat(),
+                            "source": bundle.source_name,
+                            "data_preview": data_preview,
+                        },
+                    }
+                )
+            orchestration_args = {
+                "preset_name": "fx_debate_team",
+                "user_vars": public_vars,
+                "context": context,
+                "bundle": bundle,
+            }
+            if self._event_callback is None and self._cancel_checker is None:
+                execution = self._orchestrator.run(**orchestration_args)
+            else:
+                optional_args: dict[str, Any] = {}
+                if self._event_callback is not None:
+                    optional_args["event_callback"] = self._event_callback
+                if self._cancel_checker is not None:
+                    optional_args["cancel_checker"] = self._cancel_checker
+                execution = self._orchestrator.run(
+                    **orchestration_args,
+                    **optional_args,
+                )
+            if execution.status != "completed":
+                raise RuntimeError(f"FX Debate Swarm 未完成：status={execution.status}")
+            decision = _validate_all_outputs(execution, context, bundle)
+            response = {
+                "ok": True,
+                "status": "completed",
+                "run_id": execution.run_id,
+                "request_id": context.request_id,
+                "evidence_context_id": context.evidence_context_id,
+                "preset": "fx_debate_team",
+                "data_source_policy": bundle.source_name,
+                "data_preview": data_preview,
+                "decision": decision.model_dump(mode="json"),
+                "upstream_decision": {
+                    "decision": decision.decision,
+                    "risk_action": (
+                        "none" if decision.decision == "wait" else decision.decision
+                    ),
+                },
+                "report_markdown": render_chinese_report(
+                    decision, context, data_source=bundle.source_name
+                ),
+                "warnings": ["这是研究辅助输出，不构成保证收益或自动下单指令。"],
+                "errors": [],
+            }
+            return json.dumps(response, ensure_ascii=False)
+        except FxDataServiceError as exc:
+            return _error("FX_DATA_UNAVAILABLE", str(exc))
+        except ValidationError as exc:
+            return _error("INVALID_RESOLVED_REQUEST", str(exc))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            message = str(exc)
+            code = (
+                "AMBIGUOUS_INPUT"
+                if message.startswith("AMBIGUOUS_INPUT:")
+                else "INVALID_INPUT_OR_OUTPUT"
+            )
+            return _error(code, message.removeprefix("AMBIGUOUS_INPUT: ").strip())
+        except Exception as exc:  # noqa: BLE001 - stable public Tool boundary
+            return _error("FX_DEBATE_FAILED", str(exc))
+
+
+def build_evidence_preview(
+    bundle: EvidenceBundle, *, row_limits: dict[str, int] | None = None
+) -> dict[str, Any]:
+    """Return a bounded, UI-safe view of the frozen evidence bundle.
+
+    The full bundle remains runtime-owned and is only available through the
+    evidence Tools. This projection deliberately includes no article bodies,
+    credentials, or unbounded source payloads; it is intended for the local
+    console's data-overview preview and run history.
+    """
+    limits = {**_PREVIEW_LIMITS, **(row_limits or {})}
+    domains: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    for domain in ("market", "technical", "macro", "news"):
+        items = [item for item in bundle.evidence if item.domain == domain]
+        counts[domain] = len(items)
+        domains[domain] = {
+            "count": len(items),
+            "shown": min(len(items), max(0, limits.get(domain, 24))),
+            "source_row_count": bundle.raw_counts.get(
+                domain, len(bundle.raw_preview.get(domain, []))
+            ),
+            "source_row_shown": min(
+                len(bundle.raw_preview.get(domain, [])),
+                max(0, limits.get(domain, 24)),
+            ),
+            "rows": [
+                _preview_evidence_item(item)
+                for item in items[: max(0, limits.get(domain, 24))]
+            ],
+            "source_rows": [
+                dict(row)
+                for row in bundle.raw_preview.get(domain, [])[
+                    : max(0, limits.get(domain, 24))
+                ]
+            ],
+        }
+    return {
+        "evidence_context_id": bundle.evidence_context_id,
+        "as_of": bundle.as_of.isoformat(),
+        "source": bundle.source_name,
+        "manifest": bundle.manifest.model_dump(mode="json"),
+        "counts": counts,
+        "raw_counts": bundle.raw_counts,
+        "domains": domains,
+        "derived": {
+            "relative_macro_scorecard": bundle.relative_macro_scorecard.model_dump(
+                mode="json"
+            ),
+            "technical_regime": bundle.technical_regime.model_dump(mode="json"),
+            "story_clusters": [
+                story.model_dump(mode="json") for story in bundle.story_clusters
+            ],
+        },
+    }
+
+
+def _preview_evidence_item(item: Any) -> dict[str, Any]:
+    """Keep only fields useful for a human preview and evidence traceability."""
+    return {
+        "evidence_id": item.evidence_id,
+        "family_id": item.evidence_family_id,
+        "name": item.name,
+        "timeframe": item.timeframe,
+        "value": item.value,
+        "unit": item.unit,
+        "observation_time": item.observation_time.isoformat(),
+        "available_time": item.available_time.isoformat(),
+        "quality_status": item.quality_status,
+        "source_table": item.source_table,
+        "source": item.source,
+        "calculation": item.calculation,
+        "notes": item.notes,
+    }
+
+
+def _validate_all_outputs(
+    execution: FxDebateExecution,
+    context: EvidenceContext,
+    bundle: EvidenceBundle,
+) -> FinalDecision:
+    required_tasks = [
+        "task-pair-bull",
+        "task-pair-bear",
+        "task-macro-technical",
+        "task-risk",
+        "task-judge",
+    ]
+    missing = [task for task in required_tasks if not execution.task_outputs.get(task)]
+    if missing:
+        raise ValueError(f"Swarm 缺少任务输出：{', '.join(missing)}")
+
+    raw_arguments = [
+        _extract_json(execution.task_outputs[task]) for task in required_tasks[:3]
+    ]
+    for output in raw_arguments:
+        output.setdefault("evidence_context_id", context.evidence_context_id)
+    arguments: list[FrontAgentOutput] = [
+        HypothesisArgumentV2.model_validate(raw_arguments[0]),
+        HypothesisArgumentV2.model_validate(raw_arguments[1]),
+        RelativeStateV2.model_validate(raw_arguments[2]),
+    ]
+    raw_risk = _extract_json(execution.task_outputs["task-risk"])
+    raw_risk.setdefault("evidence_context_id", context.evidence_context_id)
+    risk_review = RiskReview.model_validate(raw_risk)
+    raw_decision = _extract_json(
+        execution.final_report or execution.task_outputs["task-judge"]
+    )
+    raw_decision.setdefault("evidence_context_id", context.evidence_context_id)
+    decision = FinalDecision.model_validate(raw_decision)
+
+    store = FxEvidenceStore(execution.run_root, context.evidence_context_id)
+    store.register(bundle.evidence)
+    validator = ValidateFxOutputTool(context=context, store=store)
+    for index, argument in enumerate(raw_arguments):
+        _require_valid(
+            validator.execute(
+                mode="relative_state" if index == 2 else "hypothesis",
+                evidence_context_id=context.evidence_context_id,
+                output=argument,
+            ),
+            "FrontAgentOutputV2",
+        )
+    _require_valid(
+        validator.execute(
+            mode="risk_review",
+            evidence_context_id=context.evidence_context_id,
+            output=raw_risk,
+            upstream_arguments=raw_arguments,
+        ),
+        "RiskReview",
+    )
+    _require_valid(
+        validator.execute(
+            mode="decision",
+            evidence_context_id=context.evidence_context_id,
+            output=raw_decision,
+            upstream_arguments=[item.model_dump(mode="json") for item in arguments],
+            risk_review=risk_review.model_dump(mode="json"),
+        ),
+        "FinalDecision",
+    )
+    return decision
+
+
+def _configured_evidence_source(
+    *, trace_callback: Callable[[dict[str, Any]], None] | None = None
+) -> FxEvidenceSource:
+    from src.config.accessor import get_env_config
+
+    config = get_env_config().fx_debate
+    if config.data_source == "excel":
+        if not config.excel_path:
+            raise ValueError(
+                "FX_DEBATE_EXCEL_PATH is required when data source is excel"
+            )
+        return ExcelFxEvidenceSource(config.excel_path)
+    if config.data_source == "ai_search":
+        return AiSearchFxEvidenceSource(
+            service_url=config.data_service_url,
+            timeout_seconds=config.data_service_timeout_seconds,
+            max_rows=config.data_service_max_rows,
+            trace_callback=trace_callback,
+        )
+    return ReaderFxEvidenceSource()
+
+
+def _require_valid(raw_result: str, label: str) -> None:
+    result = json.loads(raw_result)
+    if not result.get("valid"):
+        errors = "; ".join(
+            f"{item.get('code')}: {item.get('message')}"
+            for item in result.get("errors", [])
+        )
+        raise ValueError(f"{label} 校验失败：{errors}")
+
+
+def _extract_json(text: str) -> dict[str, Any]:
+    match = _JSON_FENCE.search(text)
+    candidate = match.group(1) if match else text.strip()
+    value = json.loads(candidate)
+    if not isinstance(value, dict):
+        raise ValueError("Agent 输出必须是单一 JSON 对象")
+    return value
+
+
+def render_chinese_report(
+    decision: FinalDecision,
+    context: EvidenceContext,
+    *,
+    data_source: str = "database",
+) -> str:
+    """Render the validated decision without asking an LLM to rewrite it."""
+    action_label = {
+        "long": "做多",
+        "short": "做空",
+        "wait": "观望",
+        "hedge": "对冲",
+    }[decision.decision]
+    scenarios = decision.scenario_probabilities
+    if decision.decision == "wait":
+        plan = "当前建议：观望（wait），暂不设置入场、止损和目标价。"
+    else:
+        zone = (
+            f"{decision.trade_plan.entry_zone[0]:.5f}–"
+            f"{decision.trade_plan.entry_zone[1]:.5f}"
+            if decision.trade_plan.entry_zone
+            else "按触发条件"
+        )
+        stop = (
+            f"{decision.trade_plan.stop_loss:.5f}"
+            if decision.trade_plan.stop_loss is not None
+            else "未设置"
+        )
+        targets = "、".join(f"{value:.5f}" for value in decision.trade_plan.targets)
+        plan = (
+            f"当前建议：{action_label}（{decision.decision}）；"
+            f"入场 {zone}，止损 {stop}，目标 {targets or '未设置'}。"
+        )
+    missing = "；".join(decision.missing_data) or "无已知关键缺项"
+    evidence = "、".join(decision.key_evidence_ids) or "无"
+    conditions = (
+        "\n".join(f"- {condition}" for condition in decision.invalidation_conditions)
+        or "- 无"
+    )
+    data_policy = (
+        "本地只读 Excel 冻结证据包"
+        if data_source == "excel"
+        else "独立 AI Search 服务冻结证据包"
+        if data_source == "ai_search"
+        else f"内部 MarketDataReader 冻结证据包（{', '.join(context.provider_priority)}）"
+    )
+    return (
+        f"# {decision.display_symbol} 外汇 Debate 结论\n\n"
+        f"- 决策：{action_label}（`{decision.decision}`）\n"
+        f"- 置信度：{decision.confidence:.0%}\n"
+        f"- 判断期限：{decision.horizon_days} 天\n"
+        f"- 数据截止：{decision.data_as_of.isoformat()}\n"
+        f"- 数据政策：{data_policy}\n\n"
+        f"## 核心判断\n\n{decision.thesis}\n\n"
+        f"情景概率：上涨 {scenarios.bull:.0%} / 基准 {scenarios.base:.0%} / "
+        f"下跌 {scenarios.bear:.0%}。\n\n"
+        f"## 交易建议\n\n{plan}\n\n"
+        f"方向语义：{decision.direction_semantics}\n\n"
+        f"## 风险与证据\n\n{decision.risk_assessment}\n\n"
+        f"关键证据 ID：{evidence}\n\n"
+        f"仍缺数据：{missing}\n\n"
+        f"## 失效与复核条件\n\n{conditions}\n\n"
+        f"下一次复核：{decision.next_review_trigger}\n\n"
+        "> 研究辅助输出，不构成保证收益或自动下单指令。"
+    )
+
+
+def _json_object(value: Any, name: str) -> dict[str, Any]:
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, dict):
+        raise TypeError(f"{name} must be a JSON object")
+    return value
+
+
+def context_request_json(user_vars: dict[str, str], context: EvidenceContext) -> str:
+    """Build the trusted resolved request payload for Swarm prompt injection."""
+    return json.dumps(
+        {
+            "status": "resolved",
+            "asset_class": "fx",
+            "instrument_type": "spot",
+            "pair_class": context.pair_class,
+            "canonical_symbol": context.canonical_symbol,
+            "display_symbol": context.display_symbol,
+            "base_currency": context.base_currency,
+            "quote_currency": context.quote_currency,
+            "requested_base_currency": context.requested_base_currency,
+            "requested_quote_currency": context.requested_quote_currency,
+            "inverted": context.inverted,
+            "horizon": context.horizon,
+            "timeframe": "/".join(context.timeframes),
+            "goal": context.goal or user_vars.get("goal"),
+        },
+        ensure_ascii=False,
+    )
+
+
+def _error(code: str, message: str) -> str:
+    return json.dumps(
+        {
+            "ok": False,
+            "status": "error",
+            "error": {"code": code, "message": message},
+        },
+        ensure_ascii=False,
+    )
