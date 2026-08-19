@@ -145,7 +145,9 @@ def test_missing_preset_error_names_both_locations(user_presets_dir) -> None:
     with pytest.raises(FileNotFoundError) as excinfo:
         load_preset("does_not_exist")
     message = str(excinfo.value)
-    assert "bundled" in message and str(user_presets_dir) in message
+    assert "bundled" in message
+    assert "~/" in message and "user-presets" in message
+    assert str(Path.home()) not in message
 
 
 def test_explicit_user_preset_accepted_by_swarm_tool(user_presets_dir) -> None:

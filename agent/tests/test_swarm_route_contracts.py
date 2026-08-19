@@ -136,3 +136,32 @@ def test_swarm_detail_uses_redacted_public_task_projection(
     assert "prompt_template" not in task
     assert task["worker_iterations"] == 3
     assert task["iterations"] == 3
+
+
+def test_swarm_presets_require_auth_when_api_key_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api_server, "_API_KEY", "acceptance-token")
+
+    assert _client().get("/swarm/presets").status_code == 401
+    assert _client().get("/swarm/presets/fx_debate_team").status_code == 401
+
+
+def test_swarm_presets_metadata_is_public_projection_with_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api_server, "_API_KEY", "acceptance-token")
+    headers = {"Authorization": "Bearer acceptance-token"}
+
+    list_response = _client().get("/swarm/presets", headers=headers)
+    detail_response = _client().get("/swarm/presets/fx_debate_team", headers=headers)
+
+    assert list_response.status_code == 200
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["name"] == "fx_debate_team"
+    assert detail["agents"]
+    assert detail["tasks"]
+    assert detail["layers"]
+    assert "system_prompt" not in detail_response.text
+    assert "prompt_template" not in detail_response.text

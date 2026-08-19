@@ -1,4 +1,4 @@
-export type WorkspaceView = "chat" | "canvas" | "data" | "logs" | "report" | "settings";
+export type WorkspaceView = "chat" | "swarm" | "canvas" | "data" | "logs" | "report" | "settings";
 export type RunStatus = "idle" | "pending" | "running" | "completed" | "failed" | "cancelled";
 export type EventLayer = "AGENT" | "TOOL" | "SDK" | "DATABASE" | "SYSTEM";
 
@@ -41,6 +41,44 @@ export interface SwarmAgent {
   system_prompt?: string;
   tools?: string[];
   skills?: string[];
+}
+
+export interface SwarmPresetSummary {
+  name: string;
+  title?: string;
+  description?: string;
+  agent_count?: number;
+  variables?: Array<{ name?: string; description?: string; required?: boolean } | string>;
+  source?: "bundled" | "user" | string;
+}
+
+export interface SwarmPresetAgent {
+  id: string;
+  role: string;
+  tools: string[];
+  skills: string[];
+}
+
+export interface SwarmPresetTask {
+  id: string;
+  agent_id: string;
+  depends_on: string[];
+  input_from: Record<string, string>;
+}
+
+export interface SwarmPresetLayerNode {
+  task_id: string;
+  agent_id: string;
+}
+
+export interface SwarmPresetDetail extends SwarmPresetSummary {
+  valid?: boolean;
+  errors?: string[];
+  warnings?: string[];
+  agents: SwarmPresetAgent[];
+  tasks: SwarmPresetTask[];
+  layers: SwarmPresetLayerNode[][];
+  file?: string | null;
 }
 
 export interface SwarmTask {
