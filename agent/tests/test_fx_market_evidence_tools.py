@@ -17,6 +17,13 @@ from src.tools.fx_debate_tools import (
     GetFxEvidenceByIdsTool,
     GetFxMarketEvidenceTool,
 )
+from src.tools.validate_fx_output_tool import ValidateFxOutputTool
+
+
+def test_run_scoped_evidence_tools_are_available_without_database() -> None:
+    """MCP-backed runs still need lookup and validation over the frozen store."""
+    assert GetFxEvidenceByIdsTool.check_available() is True
+    assert ValidateFxOutputTool.check_available() is True
 
 
 def _context():
