@@ -504,9 +504,9 @@ def test_tool_result_event_status_and_evidence_credit_agree(
 
 @pytest.mark.parametrize(
     ("validate", "expected_status"),
-    [(False, "failed"), (True, "completed")],
+    [(False, "completed"), (True, "completed")],
 )
-def test_fx_worker_completion_requires_matching_validated_report(
+def test_fx_worker_completion_accepts_report_without_validation_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     validate: bool,
@@ -541,8 +541,6 @@ def test_fx_worker_completion_requires_matching_validated_report(
     )
 
     assert result.status == expected_status
-    if not validate:
-        assert "never returned valid=true" in str(result.error)
 
 
 def test_fx_worker_canonicalizes_report_to_last_validated_output(
@@ -746,6 +744,32 @@ def test_validated_fx_output_is_normalized_before_downstream_handoff() -> None:
         "Expect repricing of the EUR leg."
     )
     assert "chain_id" not in normalized["causal_chains"][0]
+
+
+def test_advisory_fx_validation_keeps_parseable_output_for_delivery() -> None:
+    output = {
+        "schema_version": "2.0",
+        "agent_role": "pair_bear",
+        "hypothesis_direction": "down",
+        "hypothesis_status": "weak",
+        "summary": "弱假设。",
+        "causal_chains": [],
+        "catalysts": [],
+        "market_confirmations": [],
+        "strongest_countercase": [],
+        "invalidation_conditions": [],
+        "coverage": {"domains": [], "evidence_family_ids": [], "limitations": []},
+        "strength": "low",
+        "missing_data": ["4H bars"],
+        "tool_calls": [],
+        "evidence_context_id": "fxctx-1",
+    }
+    normalized = _validated_output_from_call(
+        {"output": output},
+        '{"valid":false,"mode":"hypothesis","errors":[{"code":"COUNTERCASE_REQUIRED"}]}',
+    )
+    assert normalized is not None
+    assert normalized["agent_role"] == "pair_bear"
 
 
 def test_fx_validation_failure_exposes_actionable_errors(tmp_path: Path) -> None:

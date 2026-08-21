@@ -6,8 +6,10 @@ import asyncio
 import time
 from pathlib import Path
 
+import pytest
+
 from src.session.events import EventBus
-from src.session.models import Attempt
+from src.session.models import Attempt, AttemptStatus, Session
 from src.session.service import SessionService
 from src.session.store import SessionStore
 
@@ -72,13 +74,111 @@ def test_run_with_agent_keeps_event_loop_responsive_during_registry_build(
     assert tick_times[0] < 0.18, f"Registry build blocked the event loop for too long: {tick_times[0]:.3f}s"
 
 
-def test_cancel_current_records_attempt_before_agent_loop_is_ready(tmp_path: Path) -> None:
+def test_cancel_current_persists_terminal_status_before_agent_loop_is_ready(tmp_path: Path) -> None:
     service = SessionService(
         store=SessionStore(tmp_path / "sessions"),
         event_bus=EventBus(),
         runs_dir=tmp_path / "runs",
     )
-    service._active_attempts["session-1"] = "attempt-1"
+    session = Session(session_id="session-1")
+    service.store.create_session(session)
+    attempt = Attempt(session_id=session.session_id, attempt_id="attempt-1", prompt="hello")
+    attempt.mark_running()
+    service.store.create_attempt(attempt)
+    service._active_attempts[session.session_id] = attempt.attempt_id
 
-    assert service.cancel_current("session-1") is True
+    assert service.cancel_current(session.session_id) is True
     assert "attempt-1" in service._cancelled_attempts
+    persisted = service.store.get_attempt(session.session_id, attempt.attempt_id)
+    assert persisted is not None
+    assert persisted.status == AttemptStatus.CANCELLED
+    assert persisted.completed_at is not None
+
+
+def test_send_message_rejects_duplicate_active_attempt(tmp_path: Path) -> None:
+    service = SessionService(
+        store=SessionStore(tmp_path / "sessions"),
+        event_bus=EventBus(),
+        runs_dir=tmp_path / "runs",
+    )
+    session = Session(session_id="session-duplicate")
+    service.store.create_session(session)
+    attempt = Attempt(session_id=session.session_id, attempt_id="attempt-active", prompt="hello")
+    attempt.mark_running()
+    service.store.create_attempt(attempt)
+    service._active_attempts[session.session_id] = attempt.attempt_id
+
+    with pytest.raises(ValueError, match="SESSION_BUSY"):
+        asyncio.run(service.send_message(session.session_id, "再问一次"))
+
+
+def test_cancel_current_can_close_persisted_attempt_without_memory_handle(tmp_path: Path) -> None:
+    service = SessionService(
+        store=SessionStore(tmp_path / "sessions"),
+        event_bus=EventBus(),
+        runs_dir=tmp_path / "runs",
+    )
+    session = Session(session_id="session-1", last_attempt_id="attempt-1")
+    service.store.create_session(session)
+    attempt = Attempt(session_id=session.session_id, attempt_id=session.last_attempt_id, prompt="hello")
+    attempt.mark_running()
+    service.store.create_attempt(attempt)
+
+    assert service.cancel_current(session.session_id) is True
+    assert service.store.get_attempt(session.session_id, attempt.attempt_id).status == AttemptStatus.CANCELLED
+
+
+def test_late_agent_success_cannot_overwrite_cancellation(tmp_path: Path, monkeypatch) -> None:
+    service = SessionService(
+        store=SessionStore(tmp_path / "sessions"),
+        event_bus=EventBus(),
+        runs_dir=tmp_path / "runs",
+    )
+    session = Session(session_id="session-1")
+    service.store.create_session(session)
+    attempt = Attempt(session_id=session.session_id, attempt_id="attempt-1", prompt="hello")
+    service.store.create_attempt(attempt)
+    service._active_attempts[session.session_id] = attempt.attempt_id
+
+    async def _late_success(*args, **kwargs):
+        del args, kwargs
+        assert service.cancel_current(session.session_id) is True
+        return {"status": "success", "content": "late result"}
+
+    monkeypatch.setattr(service, "_run_with_agent", _late_success)
+    asyncio.run(service._run_attempt(session, attempt))
+
+    persisted = service.store.get_attempt(session.session_id, attempt.attempt_id)
+    assert persisted is not None
+    assert persisted.status == AttemptStatus.CANCELLED
+
+
+def test_cancelled_attempt_message_is_not_reported_as_execution_failure(tmp_path: Path) -> None:
+    service = SessionService(
+        store=SessionStore(tmp_path / "sessions"),
+        event_bus=EventBus(),
+        runs_dir=tmp_path / "runs",
+    )
+    attempt = Attempt(session_id="session-1", attempt_id="attempt-1", prompt="hello")
+    attempt.mark_cancelled(summary="cancelled by user")
+
+    assert service._format_result_message(attempt) == "运行已取消：本轮研究已停止，未生成最终结论。"
+
+
+def test_reconcile_incomplete_attempts_marks_restart_orphans_cancelled(tmp_path: Path) -> None:
+    service = SessionService(
+        store=SessionStore(tmp_path / "sessions"),
+        event_bus=EventBus(),
+        runs_dir=tmp_path / "runs",
+    )
+    session = Session(session_id="session-1")
+    service.store.create_session(session)
+    attempt = Attempt(session_id=session.session_id, attempt_id="attempt-1", prompt="hello")
+    attempt.mark_running()
+    service.store.create_attempt(attempt)
+
+    assert service.reconcile_incomplete_attempts() == 1
+    persisted = service.store.get_attempt(session.session_id, attempt.attempt_id)
+    assert persisted is not None
+    assert persisted.status == AttemptStatus.CANCELLED
+    assert persisted.summary == "interrupted by API restart"

@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 from src.fx_debate.evidence_sources import RawFxSnapshot
+from src.swarm.models import SwarmRun
+from src.swarm.store import SwarmStore
 from src.tools.run_fx_debate_tool import (
     DefaultFxDebateOrchestrator,
     FxDebateExecution,
     RunFxDebateTool,
     _extract_json,
+    _normalize_run_options,
+    _persist_data_trace_events,
 )
+from src.fx_debate.models import RunOptions
 
 
 def _resolved_request() -> dict:
@@ -32,6 +38,29 @@ def _resolved_request() -> dict:
         "horizon": "2 weeks",
         "timeframe": "4H/1D",
     }
+
+
+def test_date_only_as_of_is_normalized_to_aware_utc_datetime() -> None:
+    options = RunOptions.model_validate(
+        _normalize_run_options({"as_of": "2026-08-20"})
+    )
+
+    assert options.as_of is not None
+    assert options.as_of.isoformat() == "2026-08-20T00:00:00+00:00"
+
+
+def test_current_quote_timeframe_returns_user_facing_guidance() -> None:
+    payload = json.loads(
+        RunFxDebateTool(evidence_source=_FakeEvidenceSource()).execute(
+            target="EURUSD",
+            timeframe="today",
+            goal="查询今天 EURUSD 汇率",
+        )
+    )
+
+    assert payload["status"] == "error"
+    assert payload["error"]["code"] == "FX_DEBATE_TIMEFRAME_REQUIRED"
+    assert "当前汇率" in payload["error"]["message"]
 
 
 @dataclass
@@ -352,6 +381,27 @@ def test_run_fx_debate_builds_context_validates_dag_outputs_and_renders_report(
     }
 
 
+def test_run_fx_debate_normalizes_common_planner_option_aliases(tmp_path) -> None:
+    """Model-emitted medium/zh aliases must not fail before routing starts."""
+    output = json.loads(
+        RunFxDebateTool(
+            orchestrator=_FakeOrchestrator(tmp_path),
+            evidence_source=_FakeEvidenceSource(),
+        ).execute(
+            target="EURUSD",
+            timeframe="2 weeks; 4H/1D",
+            goal="分析 EURUSD 未来两周走势。",
+            run_options={
+                "risk_profile": "medium",
+                "language": "zh",
+                "as_of": "2025-07-23",
+            },
+        )
+    )
+
+    assert output["ok"] is True
+
+
 def test_run_fx_debate_rejects_ambiguous_public_and_legacy_inputs(tmp_path) -> None:
     output = json.loads(
         RunFxDebateTool(
@@ -453,3 +503,29 @@ def test_run_fx_debate_forwards_live_events_to_the_observer(tmp_path) -> None:
         "task_id": "task-pair-bull",
         "data": {"input": {"user_prompt": "分析 EURUSD"}},
     }
+
+
+def test_run_fx_debate_persists_sdk_and_mcp_trace_events(tmp_path, monkeypatch) -> None:
+    runs_root = tmp_path / "runs"
+    store = SwarmStore(runs_root)
+    store.create_run(
+        SwarmRun(
+            id="swarm-trace-test",
+            preset_name="fx_debate_team",
+            user_vars={},
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+    )
+    monkeypatch.setattr("src.swarm.store.swarm_runs_root", lambda: runs_root)
+
+    _persist_data_trace_events(
+        "swarm-trace-test",
+        [
+            {"type": "context_ready", "data": {"source": "excel"}},
+            {"type": "data_service.stage", "stage": "dataset_catalog", "progress": 1},
+            {"type": "worker_text", "data": {"content": "not a data trace"}},
+        ],
+    )
+
+    events = store.read_events("swarm-trace-test")
+    assert [event.type for event in events] == ["context_ready", "data_service.stage"]

@@ -245,6 +245,15 @@ class GetFxEvidenceByIdsTool(_FxContextTool):
     }
     repeatable = True
 
+    @classmethod
+    def check_available(cls) -> bool:
+        """Evidence lookup uses the run-scoped store, not the market DB.
+
+        The MCP source populates this store before the Swarm starts, so this
+        tool must remain available even when PostgreSQL is intentionally off.
+        """
+        return True
+
     def execute(self, **kwargs: Any) -> str:
         """Read Evidence Items by ID from the run-scoped store."""
         try:

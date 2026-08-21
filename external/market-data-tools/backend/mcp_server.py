@@ -21,7 +21,7 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 
-from .ai_search.public_response import build_public_error, build_public_response
+from .ai_search.public_response import build_evidence_response, build_public_error
 from .ai_search.tool_registry import run_tool_internal
 
 
@@ -69,7 +69,11 @@ async def unified_search(
                 max_rows=max_rows,
                 trace_callback=publish_stage if ctx is not None else None,
             )
-            return build_public_response(result)
+            # Debate consumes observation timestamps and provenance (metric_id,
+            # country/relationship role, article id, source). The ordinary
+            # public response intentionally strips those fields for the search
+            # UI, so MCP must expose the evidence contract instead.
+            return build_evidence_response(result)
         except Exception as exc:  # noqa: BLE001 - MCP 必须返回稳定结构化错误
             return build_public_error(type(exc).__name__, str(exc))
 

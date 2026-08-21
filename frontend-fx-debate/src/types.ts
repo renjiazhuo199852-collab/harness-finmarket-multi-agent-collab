@@ -139,7 +139,7 @@ export interface WorkspaceEvent {
 
 export interface EvidenceItem {
   id: string;
-  category: "market" | "news" | "technical" | "database" | "sdk" | "other";
+  category: "market" | "news" | "technical" | "macro" | "mcp" | "database" | "sdk" | "other";
   title: string;
   source?: string;
   asOf?: string;
@@ -153,6 +153,7 @@ export interface EvidenceBundle {
   symbol?: string;
   timeframe?: string;
   asOf?: string;
+  source?: string;
   items: EvidenceItem[];
   raw?: unknown;
 }
@@ -173,6 +174,14 @@ export interface FxReport {
   raw?: unknown;
 }
 
+export interface AgentReport {
+  taskId: string;
+  agentId: string;
+  role: string;
+  status: string;
+  report: string;
+}
+
 export interface WorkspaceSnapshot {
   sessionId?: string;
   runId?: string;
@@ -184,6 +193,7 @@ export interface WorkspaceSnapshot {
   events: WorkspaceEvent[];
   evidence: EvidenceBundle;
   report?: FxReport;
+  agentReports?: AgentReport[];
   lastError?: string;
 }
 

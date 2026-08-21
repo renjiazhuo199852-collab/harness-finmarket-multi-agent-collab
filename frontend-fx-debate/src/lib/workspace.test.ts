@@ -67,7 +67,7 @@ describe("FX workspace event reducer", () => {
     expect(snapshot.status).toBe("running");
   });
 
-  it("keeps only SDK and database results in the data overview bundle", () => {
+  it("keeps only MCP and database results in the data overview bundle", () => {
     let snapshot = emptySnapshot("session-data-filter");
     snapshot = applySessionEvent(snapshot, {
       id: "evt-agent-output",
@@ -88,6 +88,28 @@ describe("FX workspace event reducer", () => {
     expect(snapshot.evidence.items.map((item) => item.category)).toEqual(["sdk", "database"]);
   });
 
+  it("materializes MCP stage output in the data overview bundle", () => {
+    const snapshot = applySessionEvent(emptySnapshot("session-mcp-evidence"), {
+      id: "evt-mcp-stage",
+      type: "swarm.event",
+      data: {
+        event: {
+          type: "data_service.stage",
+          stage: "dataset_catalog",
+          status: "completed",
+          data: {
+            output: { dataset_id: "ds-eurusd", storage_table_name: "fx_bars" },
+            source: "mcp",
+          },
+        },
+      },
+    });
+
+    expect(snapshot.evidence.items).toHaveLength(1);
+    expect(snapshot.evidence.items[0]).toMatchObject({ category: "mcp", title: "数据集目录" });
+    expect(snapshot.evidence.items[0].summary).toContain("dataset_id");
+  });
+
   it("hydrates a completed run and preserves raw markdown", () => {
     const snapshot = hydrateRun("session-1", {
       id: "run-2",
@@ -102,6 +124,141 @@ describe("FX workspace event reducer", () => {
     expect(snapshot.report?.markdown).toContain("EURUSD");
     expect(snapshot.events).toHaveLength(2);
     expect(snapshot.events[1].output).toContain("上行假设");
+  });
+
+  it("keeps the parallel analyst and risk reports for the historical report view", () => {
+    const snapshot = hydrateRun("session-1", {
+      id: "run-agent-reports",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [
+        { id: "pair_bull", role: "Pair Bull" },
+        { id: "pair_bear", role: "Pair Bear" },
+        { id: "macro_technical", role: "Macro + Technical" },
+        { id: "fx_risk_officer", role: "FX Risk Officer" },
+        { id: "debate_judge", role: "Debate Judge / FX PM" },
+      ],
+      tasks: [
+        { id: "judge", agent_id: "debate_judge", status: "completed", depends_on: ["risk"], summary: "# Final decision" },
+        { id: "bull", agent_id: "pair_bull", status: "completed", summary: "# Bull report" },
+        { id: "bear", agent_id: "pair_bear", status: "completed", summary: "# Bear report" },
+        { id: "macro", agent_id: "macro_technical", status: "completed", summary: "# Macro report" },
+        { id: "risk", agent_id: "fx_risk_officer", status: "completed", summary: "# Risk report" },
+      ],
+      final_report: "# Final decision",
+    });
+
+    expect(snapshot.agentReports?.map((item) => item.agentId)).toEqual([
+      "pair_bull",
+      "pair_bear",
+      "macro_technical",
+      "fx_risk_officer",
+    ]);
+    expect(snapshot.agentReports?.map((item) => item.role)).toEqual([
+      "多头观点分析师",
+      "空头观点分析师",
+      "宏观与技术分析师",
+      "外汇风险分析师",
+    ]);
+    expect(snapshot.agentReports?.some((item) => item.agentId === "debate_judge")).toBe(false);
+  });
+
+  it("parses a FinalDecision JSON block embedded in the Markdown report", () => {
+    const snapshot = hydrateRun("session-1", {
+      id: "run-final-decision",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [],
+      tasks: [],
+      final_report: '# FinalDecision\n\n```json\n{"decision":"wait","confidence":"0.4","scenario_probabilities":{"bull":"0.25","base":"0.45","bear":"0.3"},"trade_plan":{"entry_zone":"null","stop_loss":"null","targets":""},"invalidation_conditions":{"item":["等待 live quote"]}}\n```',
+    });
+
+    expect(snapshot.report?.direction).toBe("等待确认");
+    expect(snapshot.report?.action).toBe("暂不交易");
+    expect(snapshot.report?.entry).toBeUndefined();
+    expect(snapshot.report?.takeProfit).toBeUndefined();
+    expect(snapshot.report?.probabilities).toMatchObject({ bullish: 0.25, neutral: 0.45, bearish: 0.3 });
+    expect(snapshot.report?.invalidation).toEqual(["等待 live quote"]);
+    expect(snapshot.report?.markdown).toContain("FinalDecision");
+  });
+
+  it("replays persisted swarm events so historical logs keep tool and MCP layers", () => {
+    const snapshot = hydrateRun("session-1", {
+      id: "run-history",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [{ id: "pair_bull", role: "Pair Bull" }],
+      tasks: [{ id: "bull-task", agent_id: "pair_bull", status: "completed" }],
+      events: [
+        {
+          type: "tool_call",
+          agent_id: "pair_bull",
+          task_id: "bull-task",
+          data: { tool: "get_fx_evidence_manifest", input: { target: "EURUSD" } },
+          timestamp: "2026-08-20T00:00:01Z",
+        },
+        {
+          type: "data_service.stage",
+          data: { stage: "database_query", status: "completed" },
+          timestamp: "2026-08-20T00:00:02Z",
+        },
+        { type: "run_completed", data: { status: "completed" }, timestamp: "2026-08-20T00:00:03Z" },
+      ],
+    });
+
+    expect(snapshot.events.some((event) => event.layer === "TOOL" && event.label === "get_fx_evidence_manifest")).toBe(true);
+    expect(snapshot.events.some((event) => event.layer === "MCP" && event.label === "database_query")).toBe(true);
+    expect(snapshot.status).toBe("completed");
+  });
+
+  it("restores the frozen evidence bundle for historical data overview", () => {
+    const snapshot = hydrateRun("session-1", {
+      id: "run-evidence-history",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [],
+      tasks: [],
+      evidence_bundle: {
+        evidence_context_id: "ctx-history",
+        source_name: "database",
+        as_of: "2026-08-20T00:00:00Z",
+        technical_regime: { timeframes: { "4H": {}, "1D": {} } },
+        evidence: [{ evidence_id: "quote-1", domain: "market", name: "EURUSD spot", value: { last: 1.16 }, observation_time: "2026-08-20T00:00:00Z" }],
+      },
+    });
+
+    expect(snapshot.evidence.source).toBe("database");
+    expect(snapshot.evidence.timeframe).toBe("4H/1D");
+    expect(snapshot.evidence.items).toHaveLength(1);
+    expect(snapshot.evidence.items[0]).toMatchObject({ id: "quote-1", category: "market", title: "EURUSD spot" });
+  });
+
+  it("merges persisted MCP evidence with a frozen historical evidence bundle", () => {
+    const snapshot = hydrateRun("session-mcp-history", {
+      id: "run-mcp-history",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [],
+      tasks: [],
+      events: [
+        {
+          type: "data_service.stage",
+          stage: "dataset_catalog",
+          status: "completed",
+          data: { output: { dataset_id: "ds-eurusd" }, source: "mcp" },
+          timestamp: "2026-08-20T00:00:01Z",
+        },
+      ],
+      evidence_bundle: {
+        evidence_context_id: "ctx-history-mcp",
+        source_name: "database",
+        as_of: "2026-08-20T00:00:00Z",
+        evidence: [{ evidence_id: "quote-1", domain: "market", name: "EURUSD spot", value: 1.16 }],
+      },
+    });
+
+    expect(snapshot.evidence.items.map((item) => item.category)).toEqual(["market", "mcp"]);
+    expect(snapshot.evidence.items[1]).toMatchObject({ title: "数据集目录", source: "mcp" });
   });
 
   it("extracts a report nested in the run_fx_debate tool result", () => {
@@ -134,6 +291,41 @@ describe("FX workspace event reducer", () => {
     expect(snapshot.events[0].type).toBe("context_ready");
   });
 
+  it("materializes the frozen AI-search preview into data overview evidence", () => {
+    const snapshot = applySessionEvent(emptySnapshot("session-ai-search"), {
+      id: "evt-ai-search-context",
+      type: "fx_debate.context_ready",
+      data: {
+        type: "context_ready",
+        data: {
+          evidence_context_id: "ctx-ai-search",
+          source: "ai_search",
+          as_of: "2026-08-20T04:00:00Z",
+          data_preview: {
+            evidence_context_id: "ctx-ai-search",
+            source: "ai_search",
+            counts: { market: 1, technical: 1, macro: 1, news: 1 },
+            domains: {
+              market: { count: 1, rows: [{ evidence_id: "quote-1", name: "spot_quote", value: 1.16 }] },
+              technical: { count: 1, rows: [{ evidence_id: "tech-1", name: "rsi", value: 54 }] },
+              macro: { count: 1, rows: [{ evidence_id: "macro-1", name: "policy_rate_diff", value: 1.25 }] },
+              news: { count: 1, rows: [{ evidence_id: "news-1", name: "headline", title: "ECB outlook" }] },
+            },
+          },
+        },
+      },
+    });
+
+    expect(snapshot.evidence.source).toBe("ai_search");
+    expect(snapshot.evidence.items.map((item) => item.category)).toEqual([
+      "market",
+      "technical",
+      "macro",
+      "news",
+    ]);
+    expect(snapshot.evidence.items[0].raw).toMatchObject({ evidence_id: "quote-1" });
+  });
+
   it("shows independent data-service queries in the SDK log layer", () => {
     const snapshot = applySessionEvent(emptySnapshot("session-1"), {
       id: "evt-data-service",
@@ -150,6 +342,24 @@ describe("FX workspace event reducer", () => {
 
     expect(snapshot.events[0].layer).toBe("SDK");
     expect(snapshot.events[0].label).toBe("market_bars_search");
+  });
+
+  it("shows MCP transport queries in the MCP log layer", () => {
+    const snapshot = applySessionEvent(emptySnapshot("session-mcp-query"), {
+      id: "evt-mcp-query",
+      type: "swarm.event",
+      data: {
+        event: {
+          type: "data_service.query_completed",
+          transport: "mcp_stdio",
+          tool: "unified_search",
+          status: "completed",
+        },
+      },
+    });
+
+    expect(snapshot.events[0].layer).toBe("MCP");
+    expect(snapshot.events[0].label).toBe("unified_search");
   });
 
   it("shows real MCP stages with their complete trace metadata", () => {

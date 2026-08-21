@@ -350,6 +350,7 @@ def run_worker(
     include_shell_tools: bool = False,
     grounding_block: str = "",
     agent_config: AgentConfig | None = None,
+    cancel_checker: Callable[[], bool] | None = None,
 ) -> WorkerResult:
     """Execute a single worker task using a lightweight ReAct loop.
 
@@ -387,6 +388,21 @@ def run_worker(
     max_iterations = agent_spec.max_iterations or _default_max_iterations()
     timeout = agent_spec.timeout_seconds or _default_timeout_seconds()
     available_tools = set(agent_spec.tools or [])
+
+    def _cancelled_result(iterations: int = 0) -> WorkerResult:
+        """Return a failed result so the enclosing run finalizes cancelled."""
+        _emit(event_callback, "worker_cancelled", agent_id, task_id, {"iterations": iterations})
+        return WorkerResult(
+            status="failed",
+            summary="",
+            iterations=iterations,
+            error="cancelled by user",
+            input_tokens=0,
+            output_tokens=0,
+        )
+
+    if cancel_checker is not None and cancel_checker():
+        return _cancelled_result()
 
     # 1. Build per-worker tool registry — local pool plus any operator-
     #    surfaced MCP tools, projected onto the agent's whitelist.
@@ -484,6 +500,8 @@ def run_worker(
     consecutive_content_filter_count = 0
 
     for iteration in range(max_iterations):
+        if cancel_checker is not None and cancel_checker():
+            return _cancelled_result(iteration)
         # Microcompact: clear old tool results to prevent token bloat
         tool_msgs = [m for m in messages if m.get("role") == "tool"]
         if len(tool_msgs) > _KEEP_RECENT_TOOLS:
@@ -618,12 +636,14 @@ def run_worker(
                     interval=_HEARTBEAT_INTERVAL_S,
                     emit=_on_llm_heartbeat,
                 ):
-                    return llm.stream_chat(
-                        messages,
-                        tools=tool_defs,
-                        timeout=remaining_timeout,
-                        on_text_chunk=_on_text_chunk,
-                    )
+                    stream_kwargs = {
+                        "tools": tool_defs,
+                        "timeout": remaining_timeout,
+                        "on_text_chunk": _on_text_chunk,
+                    }
+                    if cancel_checker is not None:
+                        stream_kwargs["should_cancel"] = cancel_checker
+                    return llm.stream_chat(messages, **stream_kwargs)
 
             # A transient mid-stream hiccup (connection reset) used to be
             # absorbed by ChatLLM's silent non-streaming fallback; it now
@@ -654,6 +674,8 @@ def run_worker(
             # already validated and persisted its report.  In that case the
             # report is the deterministic deliverable; asking the provider for
             # one more prose summary must not erase a valid result.
+            if "validate_fx_output" in available_tools and validated_output is None:
+                validated_output = _report_machine_output(artifact_dir)
             if "validate_fx_output" in available_tools and validated_output is not None:
                 _canonicalize_fx_report(artifact_dir, validated_output)
                 validation_issue = _fx_validation_issue(
@@ -778,6 +800,8 @@ def run_worker(
                 report_written=_report_written(artifact_dir),
                 data_tool_calls=data_tool_calls,
             )
+            if "validate_fx_output" in available_tools and validated_output is None:
+                validated_output = _report_machine_output(artifact_dir)
             if "validate_fx_output" in available_tools and validated_output is not None:
                 _canonicalize_fx_report(artifact_dir, validated_output)
             validation_issue = (
@@ -874,6 +898,8 @@ def run_worker(
 
         # Execute each tool call — inject run_dir so tools write inside artifact_dir
         for tc in response.tool_calls:
+            if cancel_checker is not None and cancel_checker():
+                return _cancelled_result(iteration + 1)
             mcp_meta = _remote_tool_metadata(registry, tc.name)
             _emit(
                 event_callback,
@@ -935,6 +961,8 @@ def run_worker(
                 except (TypeError, ValueError, json.JSONDecodeError):
                     last_validation_errors = []
                 validated_candidate = _validated_output_from_call(tc.arguments, result)
+                if validated_candidate is None:
+                    validated_candidate = _report_machine_output(artifact_dir)
                 if validated_candidate is not None:
                     validated_output = validated_candidate
                     # Also handle the less common order where the model writes
@@ -956,6 +984,13 @@ def run_worker(
             # A response may contain validation and report-writing calls in the
             # same turn.  Update the trusted output first, then canonicalize the
             # report so it cannot be compared against a stale validation result.
+            if (
+                not result_is_error
+                and tc.name == "write_file"
+                and _is_report_path(tc.arguments)
+                and validated_output is None
+            ):
+                validated_output = _report_machine_output(artifact_dir)
             if (
                 not result_is_error
                 and tc.name == "write_file"
@@ -1016,6 +1051,8 @@ def run_worker(
         report_written=_report_written(artifact_dir),
         data_tool_calls=data_tool_calls,
     )
+    if "validate_fx_output" in available_tools and validated_output is None:
+        validated_output = _report_machine_output(artifact_dir)
     if "validate_fx_output" in available_tools and validated_output is not None:
         _canonicalize_fx_report(artifact_dir, validated_output)
     validation_issue = (
@@ -1219,20 +1256,39 @@ def _report_written(artifact_dir: Path) -> bool:
         return False
 
 
+def _report_machine_output(artifact_dir: Path) -> dict[str, Any] | None:
+    """Read a report's machine JSON as a delivery fallback.
+
+    This is intentionally a presentation fallback, not a validation bypass:
+    the report was produced by the same worker and the final orchestration
+    still applies its normal evidence/context checks where possible.
+    """
+    try:
+        report = (artifact_dir / "report.md").read_text(encoding="utf-8")
+        match = _machine_json_match(report)
+        if match is None:
+            return None
+        value = json.loads(match.group(1))
+        return value if isinstance(value, dict) else None
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _validated_output_from_call(
     arguments: dict[str, Any], result: str
 ) -> dict[str, Any] | None:
-    """Return the canonical output object when the deterministic validator passed.
+    """Return a usable output object from a validation call.
 
-    The validator intentionally accepts a few compact/legacy aliases so an LLM
-    can recover from a schema error.  Keeping the raw call arguments here would
-    leak those aliases (and omit model-generated claim IDs) into ``report.md``
-    and every downstream agent.  Re-serializing the validated Pydantic model
-    gives all consumers one stable V2 shape.
+    Validation findings are advisory during the FX rollout.  A model can have
+    a semantic warning (for example, no countercase) while still producing a
+    complete report.  Keep the parsed call output in that case so the worker
+    can canonicalize and hand off the report instead of retrying until the
+    whole DAG fails.  When the output is structurally valid, re-serialize the
+    Pydantic model to retain the stable V2 shape.
     """
     try:
         payload = json.loads(result)
-        if not isinstance(payload, dict) or payload.get("valid") is not True:
+        if not isinstance(payload, dict):
             return None
         output = arguments.get("output")
         if isinstance(output, str):

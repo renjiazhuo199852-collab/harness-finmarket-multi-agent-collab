@@ -23,8 +23,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import quote
 
+from dotenv import dotenv_values
 from fastmcp.client import Client
 from fastmcp.client.transports.stdio import StdioTransport
+from fastmcp.exceptions import McpError
 
 from src.tools.mcp import _run_sync
 from src.fx_debate.models import EvidenceContext
@@ -45,6 +47,47 @@ class FxDataServiceError(RuntimeError):
     def __init__(self, message: str, *, code: str = "FX_DATA_SERVICE_ERROR") -> None:
         super().__init__(message)
         self.code = code
+
+
+def _load_mcp_dotenv(path: Path) -> dict[str, str]:
+    """Load explicit MCP service settings without overriding process defaults."""
+
+    if not path.is_file():
+        return {}
+    values = dotenv_values(path)
+    return {
+        str(key): str(value)
+        for key, value in values.items()
+        if key and value is not None
+    }
+
+
+def _build_mcp_child_env(overrides: Mapping[str, str]) -> dict[str, str]:
+    """Build a stable environment for the short-lived MCP service process."""
+
+    child_env = os.environ.copy()
+    child_env.update(overrides)
+    # The harness already owns an operator-controlled PostgreSQL configuration.
+    # Reuse it for the independent MCP process when its names are not set;
+    # callers can still provide explicit AI_SEARCH_DB_* values to override it.
+    for source_key, target_key in (
+        ("MARKET_DB_HOST", "AI_SEARCH_DB_HOST"),
+        ("MARKET_DB_PORT", "AI_SEARCH_DB_PORT"),
+        ("MARKET_DB_NAME", "AI_SEARCH_DB_NAME"),
+        ("MARKET_DB_USER", "AI_SEARCH_DB_USER"),
+        ("MARKET_DB_PASSWORD", "AI_SEARCH_DB_PASSWORD"),
+        ("OPENAI_API_KEY", "LLM_API_KEY"),
+        ("OPENAI_API_KEY", "EMBEDDING_API_KEY"),
+        ("OPENAI_BASE_URL", "LLM_BASE_URL"),
+        ("LANGCHAIN_MODEL_NAME", "LLM_MODEL"),
+    ):
+        if not child_env.get(target_key) and child_env.get(source_key):
+            child_env[target_key] = child_env[source_key]
+    # FastMCP's banner update check performs an unrelated PyPI request before
+    # the stdio server starts; proxy/NO_PROXY settings can make that startup
+    # path fail even when the data service itself is healthy.
+    child_env["FASTMCP_CHECK_FOR_UPDATES"] = "off"
+    return child_env
 
 
 @dataclass(frozen=True)
@@ -257,6 +300,7 @@ class McpAiSearchClient:
             command=command or sys.executable,
             args=_parse_mcp_args(args_json, server_module),
             working_directory=str(directory),
+            env=_load_mcp_dotenv(directory / ".env"),
             timeout_seconds=timeout_seconds,
             max_rows=max_rows,
             trace_callback=trace_callback,
@@ -346,7 +390,14 @@ class McpAiSearchClient:
                 },
             )
             raise
-        except (TimeoutError, OSError, RuntimeError, ValueError, TypeError) as exc:
+        except (
+            McpError,
+            TimeoutError,
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+        ) as exc:
             wrapped = FxDataServiceError(
                 f"MCP 数据服务连接失败：{exc}", code="FX_DATA_SERVICE_UNAVAILABLE"
             )
@@ -376,8 +427,7 @@ class McpAiSearchClient:
         参数中不增加调试字段，因此 MCP 仍然只有一个稳定的 unified_search 工具。
         """
 
-        child_env = os.environ.copy()
-        child_env.update(self.env)
+        child_env = _build_mcp_child_env(self.env)
         transport = StdioTransport(
             command=self.command,
             args=self.args,

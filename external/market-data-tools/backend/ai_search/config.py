@@ -26,10 +26,12 @@ def embedding_settings() -> dict[str, Any]:
     if not api_key:
         raise RuntimeError("请在 tools/.env 中配置 EMBEDDING_API_KEY")
 
-    endpoint = os.getenv(
-        "EMBEDDING_ENDPOINT",
-        "https://api.siliconflow.cn/v1/embeddings",
-    )
+    base_url = os.getenv("EMBEDDING_BASE_URL", "").rstrip("/")
+    endpoint = os.getenv("EMBEDDING_ENDPOINT", "").strip()
+    if base_url:
+        endpoint = f"{base_url}/embeddings"
+    elif not endpoint:
+        endpoint = "https://api.siliconflow.cn/v1/embeddings"
     model = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B")
     dimensions = int(os.getenv("EMBEDDING_DIMENSIONS", "2048"))
     if dimensions < 1:

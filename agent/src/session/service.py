@@ -85,6 +85,35 @@ class SessionService:
         self.event_bus.clear(session_id)
         return self.store.delete_session(session_id)
 
+    def reconcile_incomplete_attempts(self) -> int:
+        """Close attempts left running by a previous API process.
+
+        Session attempts execute in process memory.  If the API is restarted,
+        an attempt persisted as ``running`` can no longer make progress, so it
+        must not remain indefinitely active in the history sidebar.
+
+        Returns:
+            Number of attempts marked cancelled during reconciliation.
+        """
+        reconciled = 0
+        for session in self.store.list_sessions(limit=100_000):
+            changed = False
+            for attempt in self.store.list_attempts(session.session_id, limit=100_000):
+                if attempt.status not in {
+                    AttemptStatus.PENDING,
+                    AttemptStatus.RUNNING,
+                    AttemptStatus.WAITING_USER,
+                }:
+                    continue
+                attempt.mark_cancelled(summary="interrupted by API restart")
+                self.store.update_attempt(attempt)
+                changed = True
+                reconciled += 1
+            if changed:
+                session.updated_at = datetime.now().isoformat()
+                self.store.update_session(session)
+        return reconciled
+
     async def send_message(
         self,
         session_id: str,
@@ -107,6 +136,20 @@ class SessionService:
         session = self.store.get_session(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
+
+        # A session owns one active user turn.  Without this guard a double
+        # click, reconnect, or stale frontend submit can create two attempts
+        # that both route the same question and compete for the same SSE
+        # stream.  Terminal attempts remain resumable as a new turn.
+        active_id = self._active_attempts.get(session_id)
+        if active_id:
+            active = self.store.get_attempt(session_id, active_id)
+            if active is not None and active.status in {
+                AttemptStatus.PENDING,
+                AttemptStatus.RUNNING,
+                AttemptStatus.WAITING_USER,
+            }:
+                raise ValueError("SESSION_BUSY: 当前对话仍有运行中的任务，请先停止或等待完成。")
 
         message = Message(session_id=session_id, role=role, content=content)
         self.store.append_message(message)
@@ -145,29 +188,62 @@ class SessionService:
         attempt_id = self._active_attempts.get(session_id)
         loop = self._active_loops.get(session_id)
         if attempt_id is None:
+            # A persisted running attempt may outlive the in-memory maps after
+            # an API restart.  It is still safe to close it explicitly.
+            session = self.store.get_session(session_id)
+            attempt_id = getattr(session, "last_attempt_id", None) if session else None
+        if attempt_id is None:
             return False
+
+        attempt = self.store.get_attempt(session_id, attempt_id)
+        if attempt is None or attempt.status in {
+            AttemptStatus.COMPLETED,
+            AttemptStatus.FAILED,
+            AttemptStatus.CANCELLED,
+        }:
+            return False
+
         self._cancelled_attempts.add(attempt_id)
+        # Persist the terminal state before returning from the HTTP endpoint.
+        # Registry/MCP setup runs in a worker thread and may take longer to
+        # observe the cancellation flag; the UI and history must converge now.
+        attempt.mark_cancelled(summary="cancelled by user")
+        self.store.update_attempt(attempt)
+        session = self.store.get_session(session_id)
+        if session is not None:
+            session.updated_at = datetime.now().isoformat()
+            self.store.update_session(session)
         if loop is not None:
             loop.cancel()
         return True
 
     async def _run_attempt(self, session: Session, attempt: Attempt, *, include_shell_tools: bool = False) -> None:
         """Execute an Attempt in the background."""
-        attempt.mark_running()
-        self.store.update_attempt(attempt)
-        self.event_bus.emit(session.session_id, "attempt.started", {"attempt_id": attempt.attempt_id})
-
         try:
-            messages = self.store.get_messages(session.session_id)
-            if attempt.attempt_id in self._cancelled_attempts:
+            # The cancel endpoint can run before this task gets its first
+            # scheduling turn.  Do not transition a persisted cancellation back
+            # to running in that race window.
+            if self._attempt_is_cancelled(attempt):
                 result = {"status": "cancelled", "reason": "cancelled by user"}
             else:
-                result = await self._run_with_agent(
-                    attempt,
-                    messages=messages,
-                    include_shell_tools=include_shell_tools,
-                    session_config=dict(session.config),
-                )
+                attempt.mark_running()
+                self.store.update_attempt(attempt)
+                self.event_bus.emit(session.session_id, "attempt.started", {"attempt_id": attempt.attempt_id})
+                messages = self.store.get_messages(session.session_id)
+                if attempt.attempt_id in self._cancelled_attempts:
+                    result = {"status": "cancelled", "reason": "cancelled by user"}
+                else:
+                    result = await self._run_with_agent(
+                        attempt,
+                        messages=messages,
+                        include_shell_tools=include_shell_tools,
+                        session_config=dict(session.config),
+                    )
+
+            # Cancellation is terminal from the user's perspective even if a
+            # worker returns a late success after its provider call unwinds.
+            if self._attempt_is_cancelled(attempt):
+                result = {"status": "cancelled", "reason": "cancelled by user"}
             if result.get("status") == "success":
                 attempt.mark_completed(summary=result.get("content", ""))
             elif result.get("status") == "cancelled":
@@ -203,9 +279,20 @@ class SessionService:
             )
 
         except Exception as exc:
-            attempt.mark_failed(error=str(exc))
+            if self._attempt_is_cancelled(attempt):
+                attempt.mark_cancelled(summary="cancelled by user")
+            else:
+                attempt.mark_failed(error=str(exc))
             self.store.update_attempt(attempt)
-            self.event_bus.emit(session.session_id, "attempt.failed", {"attempt_id": attempt.attempt_id, "error": str(exc)})
+            self.event_bus.emit(
+                session.session_id,
+                "attempt.failed",
+                {
+                    "attempt_id": attempt.attempt_id,
+                    "status": attempt.status.value,
+                    "error": None if attempt.status == AttemptStatus.CANCELLED else str(exc),
+                },
+            )
         finally:
             # The early-cancel path can finish before _run_with_agent installs
             # its inner cleanup block. Keep the per-attempt cancellation state
@@ -213,6 +300,13 @@ class SessionService:
             if self._active_attempts.get(session.session_id) == attempt.attempt_id:
                 self._active_attempts.pop(session.session_id, None)
             self._cancelled_attempts.discard(attempt.attempt_id)
+
+    def _attempt_is_cancelled(self, attempt: Attempt) -> bool:
+        """Return whether cancellation was requested for this attempt."""
+        if attempt.attempt_id in self._cancelled_attempts:
+            return True
+        persisted = self.store.get_attempt(attempt.session_id, attempt.attempt_id)
+        return bool(persisted and persisted.status == AttemptStatus.CANCELLED)
 
     async def _run_with_agent(
         self,
@@ -330,8 +424,6 @@ class SessionService:
                 self._active_loops.pop(session_id, None)
             if self._active_attempts.get(session_id) == attempt_id:
                 self._active_attempts.pop(session_id, None)
-            self._cancelled_attempts.discard(attempt_id)
-
         # Load metrics from the run output when available.
         if result.get("run_dir"):
             metrics = self._load_metrics(Path(result["run_dir"]))
@@ -406,4 +498,6 @@ class SessionService:
         """Format the final execution result message."""
         if attempt.status == AttemptStatus.COMPLETED:
             return attempt.summary or "Strategy execution completed."
+        if attempt.status == AttemptStatus.CANCELLED:
+            return "运行已取消：本轮研究已停止，未生成最终结论。"
         return f"Execution failed: {attempt.error or 'unknown error'}"

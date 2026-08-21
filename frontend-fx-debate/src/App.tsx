@@ -2,15 +2,16 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import type { ReactElement } from "react";
 import {
   Activity, AlertCircle, ArrowUpRight, CheckCircle2, ChevronRight, CircleDot, Database,
-  FileText, History, ListTree, MessageSquare, Moon, Network, PanelLeft, PanelLeftClose,
-  Plus, RefreshCw, Search, Send, Server, Settings, Square, Sun, XCircle,
+  Download, FileText, History, ListTree, MessageSquare, Moon, Network, PanelLeft, PanelLeftClose,
+  Plus, RefreshCw, Search, Send, Server, Settings, Square, Sun, Trash2, XCircle,
 } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { SettingsView } from "@/components/SettingsView";
+import { buildReportDownloadMarkdown, displayReportMarkdown, downloadTextFile, localizeReportMarkdown } from "@/lib/report";
 import { SessionTransport, type SSEStatus } from "@/lib/sse";
 import { buildResearchProgress, type ProgressStageStatus, type ResearchProgressStage } from "@/lib/progress";
-import { activeSnapshot, applyRunEvent, emptyRunWorkspace, hydrateRunSnapshot, markActiveRunCancelled, replaceRunSummaries, runIdFromEvent, selectRun as selectRunState } from "@/lib/run_workspace";
+import { activeSnapshot, applyRunEvent, emptyRunWorkspace, hydrateReportsFromMessages, hydrateRunSnapshot, markActiveRunCancelled, needsRunHydration, replaceRunSummaries, runIdFromEvent, selectRun as selectRunState } from "@/lib/run_workspace";
 import { isRunActive, settleCancellation } from "@/lib/run_controls";
 import { AGENT_TEAM_CATEGORIES, agentResponsibility, agentRoleLabel, isCatalogVisible, isCorePreset, presetDisplay, taskLabel, variableLabels, type AgentTeamCategory } from "@/lib/swarmZhCN";
 import type { AgentSnapshot, DebateRunSummary, MessageItem, SessionEvent, SessionItem, SwarmPresetAgent, SwarmPresetDetail, SwarmPresetSummary, SwarmPresetTask, WorkspaceEvent, WorkspaceSnapshot, WorkspaceView } from "@/types";
@@ -92,24 +93,40 @@ function sessionStatusText(status: string): string {
 function SessionSidebar({
   sessions,
   activeSessionId,
+  deletingSessionId,
   onNew,
   onSelect,
+  onDelete,
   onReset,
 }: {
   sessions: SessionItem[];
   activeSessionId: string;
+  deletingSessionId: string | null;
   onNew: () => void;
   onSelect: (sessionId: string) => void;
+  onDelete: (sessionId: string) => void;
   onReset: () => void;
 }): ReactElement {
   return <aside className="session-sidebar">
     <div className="sidebar-heading"><div><span className="eyebrow">SESSIONS</span><h2>对话历史</h2></div><button className="sidebar-new" onClick={onNew} title="新建对话"><Plus size={17} /></button></div>
     <button className="new-session-button" onClick={onNew}><Plus size={15} />新建对话</button>
     <div className="session-list">
-      {sessions.length === 0 ? <div className="sidebar-empty"><History size={18} /><span>暂无新的对话</span><small>发送第一个问题后会显示在这里</small></div> : sessions.map((session) => <button key={session.session_id} className={`session-item ${activeSessionId === session.session_id ? "session-active" : ""}`} onClick={() => onSelect(session.session_id)}>
-        <span className="session-item-title">{session.title || "FX Debate"}</span>
-        <span className="session-item-meta"><span>{sessionTime(session.updated_at || session.created_at)}</span><span className={`session-status session-status-${session.status}`}>{sessionStatusText(session.status)}</span></span>
-      </button>)}
+      {sessions.length === 0 ? <div className="sidebar-empty"><History size={18} /><span>暂无新的对话</span><small>发送第一个问题后会显示在这里</small></div> : sessions.map((session) => <div key={session.session_id} className={`session-item ${activeSessionId === session.session_id ? "session-active" : ""}`}>
+        <button type="button" className="session-item-select" onClick={() => onSelect(session.session_id)} aria-label={`打开对话 ${session.title || "FX Debate"}`}>
+          <span className="session-item-title">{session.title || "FX Debate"}</span>
+          <span className="session-item-meta"><span>{sessionTime(session.updated_at || session.created_at)}</span><span className={`session-status session-status-${session.status}`}>{sessionStatusText(session.status)}</span></span>
+        </button>
+        <button
+          type="button"
+          className="session-delete"
+          disabled={deletingSessionId === session.session_id}
+          onClick={(event) => { event.stopPropagation(); onDelete(session.session_id); }}
+          title="删除对话"
+          aria-label={`删除对话 ${session.title || "FX Debate"}`}
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>)}
     </div>
     <button className="reset-history-button" onClick={onReset}><RefreshCw size={13} />重新开始，隐藏旧历史</button>
   </aside>;
@@ -309,14 +326,14 @@ const FX_AGENT_UI: Record<string, {
     icon: Activity,
   },
   debate_judge: {
-    title: "辩论裁判 / 交易经理",
+    title: "辩论裁决与外汇组合经理",
     subtitle: "Debate Judge / FX PM",
     description: "比较多空证据，给出主情景、备选情景和可执行的交易计划。",
     focus: "方向概率 · 交易计划",
     icon: CheckCircle2,
   },
   fx_risk_officer: {
-    title: "外汇风险官",
+    title: "外汇风险分析师",
     subtitle: "FX Risk Officer",
     description: "复核止损、止盈、持仓周期和失效条件，控制建议的最大风险。",
     focus: "止损止盈 · 失效条件",
@@ -435,14 +452,23 @@ function CanvasView({ workspace, onSelect, selectedAgentId }: { workspace: Works
 }
 
 function DataView({ workspace }: { workspace: WorkspaceSnapshot }): ReactElement {
-  const groups = ["sdk", "database"] as const;
-  const visibleItems = workspace.evidence.items.filter((item) => item.category === "sdk" || item.category === "database");
+  const groups = ["market", "technical", "macro", "news", "mcp", "sdk", "database"] as const;
+  const groupLabels: Record<(typeof groups)[number], string> = {
+    market: "行情数据",
+    technical: "技术指标",
+    macro: "宏观数据",
+    news: "新闻证据",
+    mcp: "MCP 服务",
+    sdk: "SDK 调用",
+    database: "数据库调用",
+  };
+  const visibleItems = workspace.evidence.items;
   return <div className="workspace-view">
-    <div className="view-heading"><div><span className="eyebrow">DATA ACCESS</span><h2>数据调用</h2><p>只展示本次运行中的 SDK 和数据库调用结果；Agent 文本与普通流程事件请在流程日志中查看。</p></div><div className="context-tags"><span>{workspace.variables.target || workspace.variables.symbol || "当前请求"}</span><span>{workspace.variables.timeframe || "当前周期"}</span></div></div>
-    {visibleItems.length === 0 ? <EmptyState title="暂无数据调用" detail="收到 SDK 或数据库返回后会显示在这里。" /> : <div className="evidence-groups">{groups.map((group) => {
+    <div className="view-heading"><div><span className="eyebrow">数据访问</span><h2>数据概览</h2><p>展示本次运行由 MCP、SDK、数据库或 AI Search 返回的结构化证据；Agent 推理文本请在流程日志中查看。</p></div><div className="context-tags"><span>{workspace.variables.target || workspace.variables.symbol || "当前请求"}</span><span>{workspace.variables.timeframe || "当前周期"}</span>{workspace.evidence.source ? <span>{workspace.evidence.source === "mcp" ? "MCP 服务" : workspace.evidence.source}</span> : null}</div></div>
+    {visibleItems.length === 0 ? <EmptyState title="暂无数据返回" detail="等待 MCP、SDK、数据库或 AI Search 返回本轮证据。" /> : <div className="evidence-groups">{groups.map((group) => {
       const items = visibleItems.filter((item) => item.category === group);
       if (!items.length) return null;
-      return <section className="evidence-group" key={group}><h3>{group === "sdk" ? "SDK 调用" : "数据库调用"}</h3>{items.map((item) => <details className="evidence-item" key={item.id}><summary><span>{item.title}</span><small>{item.source || "内部调用"} · {item.asOf || "未标注时间"}</small></summary><p>{item.summary || "无摘要"}</p><pre>{json(item.raw)}</pre></details>)}</section>;
+      return <section className="evidence-group" key={group}><h3>{groupLabels[group]} <em>{items.length}</em></h3>{items.map((item) => <details className="evidence-item" key={item.id}><summary><span>{item.title}</span><small>{item.source || "内部调用"} · {item.asOf || "未标注时间"}</small></summary><p>{item.summary || "已返回结构化数据"}</p><pre>{json(item.raw)}</pre></details>)}</section>;
     })}</div>}
   </div>;
 }
@@ -663,19 +689,43 @@ function LogsView({ events, runStatus, onSelect }: { events: WorkspaceEvent[]; r
   const filtered = filter === "ALL" ? events : events.filter((event) => event.layer === filter);
   return <div className="workspace-view logs-view">
     <div className="view-heading"><div><span className="eyebrow">EVENT STREAM</span><h2>流程日志</h2><p>完整调用链：Agent → Tool → MCP → SDK → Database。MCP 阶段来自本次真实查询，点击事件查看完整输入输出。</p></div><div className="filter-row">{["ALL", "AGENT", "TOOL", "MCP", "SDK", "DATABASE", "SYSTEM"].map((value) => <button className={filter === value ? "filter-active" : ""} key={value} onClick={() => setFilter(value)}>{value === "ALL" ? "全部" : value}</button>)}</div></div>
-    {filtered.length === 0 ? <EmptyState title="暂无流程事件" detail="事件会随 Session SSE 实时到达。" /> : <div className="event-table"><div className="event-row event-head"><span>时间</span><span>层级</span><span>Agent / 操作</span><span>状态</span><span>输入输出</span></div>{[...filtered].reverse().map((event) => <button className="event-row" key={event.id} onClick={() => onSelect(event)}><time>{time(event.timestamp)}</time><EventLayerPill layer={event.layer} /><span className="event-name"><strong>{event.layer === "MCP" ? mcpStageDisplayName(event) : event.label}</strong><small>{event.agentId || event.taskId || "系统"}</small></span><StatusPill status={visibleEventStatus(event, runStatus)} /><span className="event-open">查看 <ChevronRight size={14} /></span></button>)}</div>}
+    {filtered.length === 0 ? <EmptyState title={filter === "MCP" ? "本次运行没有 MCP 事件" : "暂无流程事件"} detail={filter === "MCP" ? "当前运行未记录 MCP 数据服务调用；若数据源使用 Excel，这是预期行为。切换到全部可查看其他事件。" : "事件会随 Session SSE 实时到达。"} /> : <div className="event-table"><div className="event-row event-head"><span>时间</span><span>层级</span><span>Agent / 操作</span><span>状态</span><span>输入输出</span></div>{[...filtered].reverse().map((event) => <button className="event-row" key={event.id} onClick={() => onSelect(event)}><time>{time(event.timestamp)}</time><EventLayerPill layer={event.layer} /><span className="event-name"><strong>{event.layer === "MCP" ? mcpStageDisplayName(event) : event.label}</strong><small>{event.agentId || event.taskId || "系统"}</small></span><StatusPill status={visibleEventStatus(event, runStatus)} /><span className="event-open">查看 <ChevronRight size={14} /></span></button>)}</div>}
   </div>;
 }
 
+const FX_REPORT_ORDER = ["pair_bull", "pair_bear", "macro_technical", "fx_risk_officer"];
+const FX_REPORT_LABELS: Record<string, string> = {
+  pair_bull: "多头观点分析师",
+  pair_bear: "空头观点分析师",
+  macro_technical: "宏观与技术分析师",
+  fx_risk_officer: "外汇风险分析师",
+};
+
+function reportAgents(workspace: WorkspaceSnapshot): Array<{ agentId: string; taskId: string; role: string; status: string; report: string }> {
+  if (workspace.agentReports?.length) return workspace.agentReports;
+  const tasks = new Map(workspace.tasks.map((task) => [task.agent_id === "risk_officer" ? "fx_risk_officer" : task.agent_id, task]));
+  return FX_REPORT_ORDER.flatMap((agentId) => {
+    const task = tasks.get(agentId);
+    const reportText = task?.summary?.trim();
+    return task && reportText ? [{ agentId, taskId: task.id, role: FX_REPORT_LABELS[agentId], status: task.status, report: reportText }] : [];
+  });
+}
+
 function ReportView({ report, workspace }: { report?: WorkspaceSnapshot["report"]; workspace: WorkspaceSnapshot }): ReactElement {
-  if (!report) return <div className="workspace-view"><div className="view-heading"><div><span className="eyebrow">DECISION OUTPUT</span><h2>最终报告</h2><p>最终结果由本次路由选中的实际处理链路生成。</p></div></div><EmptyState title="报告尚未生成" detail={workspace.status === "failed" ? workspace.lastError || "本次运行失败，请查看流程日志。" : "等待当前处理链路完成。"} /></div>;
-  return <div className="workspace-view report-view"><div className="view-heading"><div><span className="eyebrow">DECISION OUTPUT</span><h2>最终报告</h2><p>结构化字段优先；原始 Markdown 保留在下方。</p></div><StatusPill status={workspace.status} /></div>
-    <div className="report-overview"><div className="decision-block"><span>方向判断</span><strong>{report.direction || "数据不足"}</strong><small>置信度：{report.confidence ?? "未提供"}</small></div><div className="decision-block"><span>交易动作</span><strong>{report.action || "数据不足"}</strong><small>{report.holdingPeriod || "未提供持仓周期"}</small></div>{report.probabilities && <div className="probability-block"><span>概率分布</span>{Object.entries(report.probabilities).map(([key, value]) => <div className="probability" key={key}><label>{key === "bullish" ? "看涨" : key === "bearish" ? "看跌" : "震荡"}<b>{value ?? "-"}</b></label><div><i style={{ width: `${Math.min(100, Number(value || 0) * (Number(value || 0) <= 1 ? 100 : 1))}%` }} /></div></div>)}</div>}</div>
-    <div className="report-grid">{[["入场区间", report.entry], ["止损", report.stopLoss], ["止盈", report.takeProfit]].map(([label, value]) => <div className="report-field" key={label}><span>{label}</span><strong>{value || "数据不足"}</strong></div>)}</div>
-    {report.rationale && <section className="report-section"><h3>核心依据</h3><ul>{report.rationale.map((item) => <li key={item}>{item}</li>)}</ul></section>}
-    {report.invalidation && <section className="report-section"><h3>失效条件</h3><ul>{report.invalidation.map((item) => <li key={item}>{item}</li>)}</ul></section>}
-    {report.risks && <section className="report-section risk-section"><h3>风险提示</h3><ul>{report.risks.map((item) => <li key={item}>{item}</li>)}</ul></section>}
-    {report.markdown && <details className="raw-disclosure"><summary>查看原始报告文本</summary><pre>{report.markdown}</pre></details>}
+  if (!report) return <div className="workspace-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>最终结果由本次路由选中的实际处理链路生成。</p></div></div><EmptyState title="报告尚未生成" detail={workspace.status === "failed" ? workspace.lastError || "本次运行失败，请查看流程日志。" : "等待当前处理链路完成。"} /></div>;
+  const agentReportItems = reportAgents(workspace);
+  const downloadContent = buildReportDownloadMarkdown(report, agentReportItems, workspace.variables.target || workspace.variables.symbol);
+  const localizedMarkdown = report.markdown ? localizeReportMarkdown(displayReportMarkdown(report.markdown)) : undefined;
+  const downloadName = `${(workspace.variables.target || workspace.variables.symbol || "fx-debate").replace(/[^a-zA-Z0-9_-]+/g, "-")}-研究报告-${new Date().toISOString().slice(0, 10)}.md`;
+  return <div className="workspace-view report-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>先展示辩论裁决全文，再列出各研究节点的完整报告。</p></div><StatusPill status={workspace.status} /></div>
+    <div className="report-actions"><button className="text-button report-download-button" type="button" onClick={() => downloadTextFile(downloadContent, downloadName)} title="下载完整报告"><Download size={15} />下载完整报告</button></div>
+    {localizedMarkdown && <section className="report-section report-full-markdown"><div className="report-section-heading"><div><h3>辩论裁决最终结果</h3><span>辩论裁决与外汇组合经理</span></div><StatusPill status="completed" /></div><div className="report-markdown"><MarkdownContent>{localizedMarkdown}</MarkdownContent></div></section>}
+    <div className="report-overview"><div className="decision-block"><span>方向判断</span><strong>{localizeReportMarkdown(report.direction || "等待确认")}</strong><small>置信度：{report.confidence ?? "未提供"}</small></div><div className="decision-block"><span>交易动作</span><strong>{localizeReportMarkdown(report.action || "暂不交易")}</strong><small>{localizeReportMarkdown(report.holdingPeriod || "等待条件满足")}</small></div>{report.probabilities && <div className="probability-block"><span>概率分布</span>{Object.entries(report.probabilities).map(([key, value]) => <div className="probability" key={key}><label>{key === "bullish" ? "看涨" : key === "bearish" ? "看跌" : "震荡"}<b>{value ?? "-"}</b></label><div><i style={{ width: `${Math.min(100, Number(value || 0) * (Number(value || 0) <= 1 ? 100 : 1))}%` }} /></div></div>)}</div>}</div>
+    <div className="report-grid">{[["入场区间", report.entry], ["止损", report.stopLoss], ["止盈", report.takeProfit]].map(([label, value]) => <div className="report-field" key={label}><span>{label}</span><strong>{value ? localizeReportMarkdown(value) : "不适用"}</strong></div>)}</div>
+    {report.rationale && <section className="report-section"><h3>核心依据</h3><ul>{report.rationale.map((item) => <li key={item}>{localizeReportMarkdown(item)}</li>)}</ul></section>}
+    {report.invalidation && <section className="report-section"><h3>失效条件</h3><ul>{report.invalidation.map((item) => <li key={item}>{localizeReportMarkdown(item)}</li>)}</ul></section>}
+    {report.risks && <section className="report-section risk-section"><h3>风险提示</h3><ul>{report.risks.map((item) => <li key={item}>{localizeReportMarkdown(item)}</li>)}</ul></section>}
+    {agentReportItems.length > 0 && <section className="report-section report-agent-reports"><div className="report-section-heading"><div><h3>研究节点完整报告</h3><span>前三个分析师与外汇风险分析师</span></div><span>{agentReportItems.length} 份</span></div>{agentReportItems.map((item) => <article className="agent-report-section" key={item.taskId}><div className="agent-report-heading"><div><h4>{item.role}</h4><span>研究节点报告</span></div><StatusPill status={item.status || "completed"} /></div><div className="report-markdown"><MarkdownContent>{localizeReportMarkdown(displayReportMarkdown(item.report))}</MarkdownContent></div></article>)}</section>}
   </div>;
 }
 
@@ -776,6 +826,7 @@ export default function App(): ReactElement {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">(() => (localStorage.getItem("fx-debate-theme") as "light" | "dark") || "light");
   const [selected, setSelected] = useState<AgentSnapshot | WorkspaceEvent | null>(null);
 
@@ -855,6 +906,7 @@ export default function App(): ReactElement {
       void api.getMessages(sessionId).then((items) => {
         if (!active) return;
         setMessages(items);
+        setRunWorkspace((current) => hydrateReportsFromMessages(current, items));
       }).catch((cause: unknown) => { if (active) setError(cause instanceof Error ? cause.message : "无法加载 Session"); });
       void api.listSessionRuns(sessionId).then((items) => {
         if (!active) return;
@@ -883,6 +935,10 @@ export default function App(): ReactElement {
     });
     return () => { active = false; transport.disconnect(); };
   }, [consume, historyEpoch, sessionId, transport]);
+
+  useEffect(() => {
+    setRunWorkspace((current) => hydrateReportsFromMessages(current, messages));
+  }, [messages]);
 
   const setView = (view: WorkspaceView) => {
     setActiveView(view);
@@ -923,7 +979,7 @@ export default function App(): ReactElement {
   const selectRun = useCallback((runId: string) => {
     setRunWorkspace((current) => selectRunState(current, runId));
     updateUrl({ run: runId });
-    if (!runWorkspace.snapshots[runId]) {
+    if (needsRunHydration(runWorkspace.snapshots[runId])) {
       void api.getSwarmRun(runId).then((run) => setRunWorkspace((current) => hydrateRunSnapshot(current, run as unknown as Record<string, unknown>))).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "无法加载该运行"));
     }
     setSelected(null);
@@ -942,16 +998,39 @@ export default function App(): ReactElement {
         setRunWorkspace((current) => markActiveRunCancelled(current));
         setReasoning(false);
         setStreamingText("");
+        // The backend persists cancellation before returning, so refresh the
+        // sidebar immediately instead of waiting for the worker to unwind.
+        refreshSessions();
       }
     } catch (cause: unknown) {
       cancellationRequested.current = false;
       setCancelling(false);
       setError(cause instanceof Error ? cause.message : "停止运行失败");
     }
-  }, [cancelling, sessionId]);
+  }, [cancelling, refreshSessions, sessionId]);
 
   const workspace = activeSnapshot(runWorkspace);
   const runActive = isRunActive(busy, workspace.status);
+
+  const deleteConversation = useCallback(async (id: string) => {
+    if (deletingSessionId) return;
+    const target = sessions.find((item) => item.session_id === id);
+    if (!target || !window.confirm(`确定删除“${target.title || "FX Debate"}”及其运行记录吗？`)) return;
+    setDeletingSessionId(id);
+    setError("");
+    try {
+      // Persist cancellation before removing an active session so its worker
+      // cannot keep appending events after the history entry is gone.
+      if (id === sessionId && runActive) await api.cancelSession(id);
+      await api.deleteSession(id);
+      setSessions((items) => items.filter((item) => item.session_id !== id));
+      if (id === sessionId) startNewConversation();
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : "删除对话失败");
+    } finally {
+      setDeletingSessionId(null);
+    }
+  }, [deletingSessionId, runActive, sessionId, sessions, startNewConversation]);
 
   const send = async () => {
     const content = draft.trim();
@@ -990,7 +1069,7 @@ export default function App(): ReactElement {
     <header className="topbar"><button className="icon-button sidebar-toggle" onClick={() => setSidebarOpen((open) => !open)} title={sidebarOpen ? "收起对话历史" : "展开对话历史"}>{sidebarOpen ? <PanelLeftClose size={17} /> : <PanelLeft size={17} />}</button><div className="brand"><div className="brand-mark"><Network size={17} /></div><div><strong>FX Debate 外汇多智能体研究工作台</strong><span>基于 Vibe-Trading 的多智能体外汇研究与辩论平台</span></div></div><div className="topbar-center backend-connection" title={backendConnection.title}><span className={`connection-dot backend-connection-${backendConnectionStatus}`} />{backendConnection.label}</div><div className="topbar-actions"><span className="backend-status"><Server size={14} /> 后端 API</span><button className="icon-button" title={theme === "light" ? "切换到深色" : "切换到浅色"} onClick={() => setTheme(theme === "light" ? "dark" : "light")}>{theme === "light" ? <Moon size={17} /> : <Sun size={17} />}</button></div></header>
     <nav className="tabs" aria-label="工作区视图">{(Object.keys(VIEW_LABELS) as WorkspaceView[]).map((view) => { const Icon = VIEW_ICONS[view]; return <button key={view} className={activeView === view ? "tab-active" : ""} onClick={() => setView(view)}><Icon size={16} />{VIEW_LABELS[view]}{view === "canvas" && workspace.agents.length > 0 ? <span className="tab-count">{workspace.agents.length}</span> : null}</button>; })}</nav>
     <div className={`workspace-body ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
-      <SessionSidebar sessions={sessions} activeSessionId={sessionId} onNew={startNewConversation} onSelect={openSession} onReset={resetVisibleHistory} />
+      <SessionSidebar sessions={sessions} activeSessionId={sessionId} deletingSessionId={deletingSessionId} onNew={startNewConversation} onSelect={openSession} onDelete={deleteConversation} onReset={resetVisibleHistory} />
       <main className="main-content">
       {error && <div className="error-banner"><AlertCircle size={16} />{error}<button onClick={() => setError("")} title="关闭"><XCircle size={15} /></button></div>}
       <RunSwitcher summaries={runWorkspace.summaries} activeRunId={runWorkspace.activeRunId} onSelect={selectRun} />

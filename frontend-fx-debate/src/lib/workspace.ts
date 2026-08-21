@@ -1,6 +1,8 @@
 import type {
+  AgentReport,
   AgentSnapshot,
   EvidenceBundle,
+  EvidenceItem,
   EventLayer,
   FxReport,
   MessageItem,
@@ -13,6 +15,14 @@ import type {
 } from "@/types";
 
 export const FX_AGENT_ORDER = ["pair_bull", "pair_bear", "macro_technical", "fx_risk_officer", "debate_judge"];
+
+const FX_REPORT_AGENT_ORDER = ["pair_bull", "pair_bear", "macro_technical", "fx_risk_officer"];
+const FX_REPORT_ROLE_LABELS: Record<string, string> = {
+  pair_bull: "多头观点分析师",
+  pair_bear: "空头观点分析师",
+  macro_technical: "宏观与技术分析师",
+  fx_risk_officer: "外汇风险分析师",
+};
 
 export const FX_AGENT_DEFINITIONS: AgentSnapshot[] = [
   { id: "pair_bull", role: "Pair Bull", status: "pending" },
@@ -53,7 +63,10 @@ function layerFor(type: string, data: Record<string, unknown>): EventLayer {
   if (effectiveType === "context_ready" || type === "fx_debate.context_ready") return "SDK";
   if (type === "data_service.stage" || effectiveType === "data_service.stage" || effectiveType === "mcp.stage" || effectiveType === "mcp_stage") return "MCP";
   if (effectiveType.startsWith("tool_")) return "TOOL";
-  if (effectiveType.startsWith("data_service.")) return "SDK";
+  if (effectiveType.startsWith("data_service.")) {
+    const transport = String(data.transport || data.source || "").toLowerCase();
+    return transport === "mcp_stdio" || transport === "mcp" ? "MCP" : "SDK";
+  }
   if (effectiveType.includes("database") || effectiveType.includes("db") || String(data.layer || "").toLowerCase() === "database") return "DATABASE";
   if (effectiveType.includes("sdk") || effectiveType.includes("reader")) return "SDK";
   if (effectiveType.startsWith("swarm.") || effectiveType.startsWith("attempt.") || effectiveType.startsWith("message.") || effectiveType === "heartbeat") return "SYSTEM";
@@ -139,6 +152,24 @@ function deriveAgents(agents: SwarmAgent[], tasks: SwarmTask[]): AgentSnapshot[]
   return derived;
 }
 
+function deriveAgentReports(tasks: SwarmTask[], agents: SwarmAgent[]): AgentReport[] {
+  const byAgent = new Map(agents.map((agent) => [normalizeFxAgentId(agent.id) || agent.id, agent]));
+  const byId = new Map(tasks.map((task) => [normalizeFxAgentId(task.agent_id) || task.agent_id, task]));
+  return FX_REPORT_AGENT_ORDER.flatMap((agentId) => {
+    const task = byId.get(agentId);
+    const report = task?.summary?.trim();
+    if (!task || !report) return [];
+    const agent = byAgent.get(agentId);
+    return [{
+      taskId: task.id,
+      agentId,
+      role: FX_REPORT_ROLE_LABELS[agentId] || agent?.role || task.agent_id,
+      status: task.status || "completed",
+      report,
+    } satisfies AgentReport];
+  });
+}
+
 export function fromStarted(sessionId: string | undefined, data: Record<string, unknown>): WorkspaceSnapshot {
   const agents = Array.isArray(data.agents) ? data.agents as SwarmAgent[] : [];
   const tasks = Array.isArray(data.tasks) ? data.tasks as SwarmTask[] : [];
@@ -216,60 +247,253 @@ function updateAgent(agents: AgentSnapshot[], event: WorkspaceEvent): AgentSnaps
 
 function extractReport(data: unknown): FxReport | undefined {
   if (!data) return undefined;
-  const value = typeof data === "string" ? (() => { try { return JSON.parse(data) as unknown; } catch { return undefined; } })() : data;
-  if (!value || typeof value !== "object") return undefined;
-  const obj = value as Record<string, unknown>;
-  const rawReport = obj.final_report || obj.report || obj.decision;
-  if (typeof rawReport === "string") {
-    const parsed = (() => { try { return JSON.parse(rawReport) as unknown; } catch { return undefined; } })();
-    if (!parsed || typeof parsed !== "object") return { markdown: rawReport, raw: value };
-    return extractReport(parsed) || { markdown: rawReport, raw: value };
+  if (typeof data === "string") {
+    const markdown = data;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(markdown);
+    } catch {
+      const fenced = markdown.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+      if (fenced) {
+        try { parsed = JSON.parse(fenced); } catch { parsed = undefined; }
+      }
+    }
+    if (parsed && typeof parsed === "object") {
+      const structured = extractReport(parsed);
+      if (structured) return { ...structured, markdown, raw: data };
+    }
+    return { markdown, raw: data };
   }
-  const reportKeys = ["direction", "bias", "recommendation", "action", "confidence", "entry", "entry_range", "stop_loss", "take_profit", "probabilities", "rationale", "markdown"];
-  if (!rawReport && !reportKeys.some((key) => key in obj)) return undefined;
-  const report = (rawReport && typeof rawReport === "object" ? rawReport : obj) as Record<string, unknown>;
-  if (!report || typeof report !== "object") return undefined;
-  const probabilities = report.probabilities && typeof report.probabilities === "object" ? report.probabilities as Record<string, unknown> : undefined;
+  if (typeof data !== "object") return undefined;
+  const value = data as Record<string, unknown>;
+  const embedded = value.final_report || value.report;
+  if (embedded && typeof embedded === "object") {
+    const structured = extractReport(embedded);
+    if (structured) return structured;
+  }
+  if (typeof embedded === "string") {
+    const structured = extractReport(embedded);
+    if (structured) return structured;
+  }
+  const reportKeys = [
+    "direction", "bias", "recommendation", "action", "decision", "confidence", "entry", "entry_range",
+    "stop_loss", "take_profit", "trade_plan", "probabilities", "scenario_probabilities", "rationale",
+    "thesis", "risk_assessment", "invalidation", "invalidation_conditions", "markdown",
+  ];
+  if (!reportKeys.some((key) => key in value)) return undefined;
+  const report = value;
+  const tradePlan = report.trade_plan && typeof report.trade_plan === "object" ? report.trade_plan as Record<string, unknown> : {};
+  const decision = displayDecision(asDisplayString(report.decision));
+  const action = asDisplayString(report.action) || asDisplayString(report.trade_action) || (decision ? decision.action : undefined);
+  const direction = asDisplayString(report.direction) || asDisplayString(report.bias) || asDisplayString(report.recommendation) || (decision ? decision.direction : undefined);
+  const probabilities = (report.probabilities || report.scenario_probabilities) && typeof (report.probabilities || report.scenario_probabilities) === "object"
+    ? (report.probabilities || report.scenario_probabilities) as Record<string, unknown>
+    : undefined;
+  const invalidationValue = report.invalidation || report.invalidation_conditions;
+  const invalidation = arrayValue(invalidationValue);
   return {
-    direction: asString(report.direction) || asString(report.bias) || asString(report.recommendation),
-    action: asString(report.action) || asString(report.trade_action),
+    direction,
+    action,
     confidence: report.confidence as string | number | undefined,
-    entry: asString(report.entry) || asString(report.entry_range),
-    stopLoss: asString(report.stop_loss) || asString(report.stopLoss),
-    takeProfit: asString(report.take_profit) || asString(report.takeProfit),
-    holdingPeriod: asString(report.holding_period) || asString(report.holdingPeriod),
+    entry: asDisplayString(report.entry) || asDisplayString(report.entry_range) || asDisplayString(tradePlan.entry_zone),
+    stopLoss: asDisplayString(report.stop_loss) || asDisplayString(report.stopLoss) || asDisplayString(tradePlan.stop_loss),
+    takeProfit: asDisplayString(report.take_profit) || asDisplayString(report.takeProfit) || arrayValue(tradePlan.targets)?.join(" / "),
+    holdingPeriod: asDisplayString(report.holding_period) || asDisplayString(report.holdingPeriod) || (asDisplayString(report.horizon_days) ? `${asDisplayString(report.horizon_days)} 天` : undefined),
     probabilities: probabilities ? {
       bullish: Number(probabilities.bullish ?? probabilities.bull ?? 0) || undefined,
       bearish: Number(probabilities.bearish ?? probabilities.bear ?? 0) || undefined,
-      neutral: Number(probabilities.neutral ?? probabilities.sideways ?? 0) || undefined,
+      neutral: Number(probabilities.neutral ?? probabilities.base ?? probabilities.sideways ?? 0) || undefined,
     } : undefined,
-    rationale: Array.isArray(report.rationale) ? report.rationale.map(String) : undefined,
-    invalidation: Array.isArray(report.invalidation) ? report.invalidation.map(String) : undefined,
-    risks: Array.isArray(report.risks) ? report.risks.map(String) : undefined,
-    markdown: asString(obj.final_report) || asString(obj.markdown),
+    rationale: arrayValue(report.rationale) || (asDisplayString(report.thesis) ? [asDisplayString(report.thesis)!] : undefined),
+    invalidation,
+    risks: arrayValue(report.risks) || (asDisplayString(report.risk_assessment) ? [asDisplayString(report.risk_assessment)!] : undefined),
+    markdown: asString(value.markdown),
     raw: value,
   };
 }
 
+function asDisplayString(value: unknown): string | undefined {
+  const text = asString(value)?.trim();
+  if (!text || ["null", "none", "n/a", "na", "undefined"].includes(text.toLowerCase())) return undefined;
+  return text;
+}
+
+function arrayValue(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) return value.map(String).filter((item) => item.trim());
+  const record = asRecord(value);
+  if (record && Array.isArray(record.item)) return arrayValue(record.item);
+  return asDisplayString(value) ? [asDisplayString(value)!] : undefined;
+}
+
+function displayDecision(value?: string): { direction: string; action: string } | undefined {
+  if (!value) return undefined;
+  const normalized = value.toLowerCase();
+  if (["wait", "hold", "no_trade", "no-trade", "flat"].includes(normalized)) return { direction: "等待确认", action: "暂不交易" };
+  if (["long", "buy", "bull", "up"].includes(normalized)) return { direction: "偏多", action: "做多" };
+  if (["short", "sell", "bear", "down"].includes(normalized)) return { direction: "偏空", action: "做空" };
+  return { direction: value, action: value };
+}
+
+const EVIDENCE_DOMAINS = ["market", "technical", "macro", "news", "mcp"] as const;
+
+const MCP_EVIDENCE_LABELS: Record<string, string> = {
+  dataset_catalog: "数据集目录",
+  dataset_query_context: "数据集查询上下文",
+  dataset_search: "数据集检索",
+  database_query: "数据库查询",
+  tool_execution: "MCP 工具执行",
+};
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function previewSummary(row: Record<string, unknown>): string | undefined {
+  for (const key of ["summary", "description", "headline", "title", "value", "close", "price", "reading"]) {
+    const value = row[key];
+    if (typeof value === "string" && value.trim()) return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+  }
+  const compact = Object.entries(row)
+    .filter(([key]) => !["evidence_id", "id", "raw", "source", "as_of", "timestamp"].includes(key))
+    .slice(0, 4)
+    .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join(" · ");
+  return compact || undefined;
+}
+
+function previewEvidence(
+  event: WorkspaceEvent,
+  data: Record<string, unknown>,
+): EvidenceBundle | undefined {
+  const preview = asRecord(data.data_preview) || asRecord(event.output);
+  if (!preview) return undefined;
+  const domains = asRecord(preview.domains);
+  if (!domains) return undefined;
+
+  const source = asString(preview.source) || asString(data.source);
+  const asOf = asString(preview.as_of) || asString(data.as_of);
+  const items: EvidenceItem[] = [];
+  for (const domain of EVIDENCE_DOMAINS) {
+    const group = asRecord(domains[domain]);
+    if (!group) continue;
+    const rows = Array.isArray(group.rows) ? group.rows : [];
+    rows.forEach((value, index) => {
+      const row = asRecord(value);
+      if (!row) return;
+      const id = asString(row.evidence_id) || asString(row.id) || `${event.id}-${domain}-${index}`;
+      items.push({
+        id,
+        category: domain,
+        title: asString(row.name) || asString(row.title) || asString(row.type) || `${domain} evidence ${index + 1}`,
+        source: asString(row.source) || source,
+        asOf: asString(row.as_of) || asString(row.timestamp) || asOf,
+        summary: previewSummary(row),
+        raw: row,
+        status: asString(row.quality_status) || event.status,
+      });
+    });
+    if (!rows.length && Number(group.count || 0) > 0) {
+      items.push({
+        id: `${event.id}-${domain}-summary`,
+        category: domain,
+        title: `${domain} evidence`,
+        source,
+        asOf,
+        summary: `${String(group.count)} 条数据已返回，可在原始事件中查看完整结构。`,
+        raw: group,
+        status: event.status,
+      });
+    }
+  }
+  return {
+    symbol: asString(preview.symbol) || asString(data.symbol),
+    timeframe: asString(preview.timeframe) || asString(data.timeframe),
+    asOf,
+    source,
+    items,
+    raw: preview,
+  };
+}
+
+function persistedEvidenceBundle(value: unknown): EvidenceBundle | undefined {
+  const bundle = asRecord(value);
+  if (!bundle) return undefined;
+  const source = asString(bundle.source_name) || asString(bundle.source);
+  const technical = asRecord(bundle.technical_regime);
+  const timeframes = asRecord(technical?.timeframes);
+  const timeframe = timeframes ? Object.keys(timeframes).join("/") : asString(bundle.timeframe);
+  const rows = Array.isArray(bundle.evidence) ? bundle.evidence : [];
+  const items: EvidenceItem[] = rows.flatMap((value, index) => {
+    const row = asRecord(value);
+    if (!row) return [];
+    const rawCategory = asString(row.domain) || asString(row.category);
+    const category = EVIDENCE_DOMAINS.includes(rawCategory as (typeof EVIDENCE_DOMAINS)[number])
+      ? rawCategory as EvidenceItem["category"]
+      : "other";
+    return [{
+      id: asString(row.evidence_id) || asString(row.id) || `persisted-evidence-${index}`,
+      category,
+      title: asString(row.name) || asString(row.title) || asString(row.type) || `${category} evidence ${index + 1}`,
+      source: asString(row.source) || source,
+      asOf: asString(row.observation_time) || asString(row.available_time) || asString(row.as_of) || asString(bundle.as_of),
+      summary: previewSummary(row) || asString(row.notes),
+      query: asString(row.source_identifier),
+      raw: row,
+      status: asString(row.quality_status),
+    } satisfies EvidenceItem];
+  });
+  return {
+    symbol: asString(bundle.symbol),
+    timeframe,
+    asOf: asString(bundle.as_of),
+    source,
+    items,
+    raw: bundle,
+  };
+}
+
 function updateEvidence(snapshot: WorkspaceSnapshot, event: WorkspaceEvent): EvidenceBundle {
-  if (event.layer !== "SDK" && event.layer !== "DATABASE") return snapshot.evidence;
+  if (event.layer !== "SDK" && event.layer !== "MCP" && event.layer !== "DATABASE") return snapshot.evidence;
   const raw = event.raw as Record<string, unknown>;
   const nested = raw.event && typeof raw.event === "object" ? raw.event as Record<string, unknown> : raw;
   const data = nested.data && typeof nested.data === "object" ? nested.data as Record<string, unknown> : nested;
-  const category = event.layer === "DATABASE" ? "database" : "sdk";
+  const category: EvidenceItem["category"] = event.layer === "DATABASE"
+    ? "database"
+    : event.layer === "MCP" ? "mcp" : "sdk";
+  const contextPreview = previewEvidence(event, data);
+  if (contextPreview) {
+    return {
+      ...snapshot.evidence,
+      ...contextPreview,
+      items: [...snapshot.evidence.items, ...contextPreview.items],
+    };
+  }
   if (!event.output && !data.summary && !data.result && !data.preview) return snapshot.evidence;
+  const outputRecord = asRecord(event.output);
+  const outputValue = asRecord(outputRecord?.output) || outputRecord;
   const item: EvidenceBundle["items"][number] = {
     id: event.id,
     category,
-    title: event.label,
-    source: asString(data.source) || asString(data.provider),
+    title: event.layer === "MCP"
+      ? MCP_EVIDENCE_LABELS[event.stage || event.label] || `MCP 服务：${event.label}`
+      : event.label,
+    source: asString(data.source) || asString(data.provider) || (event.layer === "MCP" ? "mcp" : undefined),
     asOf: asString(data.as_of) || asString(data.timestamp),
-    summary: asString(data.summary) || asString(data.preview) || asString(event.output),
+    summary: asString(data.summary) || asString(data.preview) || asString(event.output)
+      || (outputValue ? previewSummary(outputValue) : undefined),
     query: event.input,
     raw,
     status: event.status,
   };
-  return { ...snapshot.evidence, items: [...snapshot.evidence.items, item] };
+  return {
+    ...snapshot.evidence,
+    source: snapshot.evidence.source || asString(data.source) || asString(data.provider),
+    asOf: snapshot.evidence.asOf || asString(data.as_of),
+    items: [...snapshot.evidence.items, item],
+  };
 }
 
 export function applySessionEvent(snapshot: WorkspaceSnapshot, sessionEvent: SessionEvent): WorkspaceSnapshot {
@@ -324,6 +548,7 @@ export function applySessionEvent(snapshot: WorkspaceSnapshot, sessionEvent: Ses
 export function hydrateRun(sessionId: string | undefined, run: Record<string, unknown>): WorkspaceSnapshot {
   const tasks = Array.isArray(run.tasks) ? run.tasks as SwarmTask[] : [];
   const swarmAgents = Array.isArray(run.agents) ? run.agents as SwarmAgent[] : [];
+  const agentReports = deriveAgentReports(tasks, swarmAgents);
   const started = fromStarted(sessionId, {
     run_id: run.id,
     preset: run.preset_name,
@@ -353,11 +578,33 @@ export function hydrateRun(sessionId: string | undefined, run: Record<string, un
       raw: task,
     };
   });
+  const persistedEvents = Array.isArray(run.events) ? run.events : [];
+  let replayed = started;
+  persistedEvents.forEach((raw, index) => {
+    if (!raw || typeof raw !== "object") return;
+    replayed = applySessionEvent(replayed, {
+      id: `swarm-${String(run.id || "run")}-${index}`,
+      type: "swarm.event",
+      data: { run_id: run.id, event: raw },
+    });
+  });
+  const persistedEvidence = persistedEvidenceBundle(run.evidence_bundle);
+  const evidence = persistedEvidence
+    ? {
+      ...persistedEvidence,
+      items: [
+        ...persistedEvidence.items,
+        ...replayed.evidence.items.filter((item) => !persistedEvidence.items.some((stored) => stored.id === item.id)),
+      ],
+    }
+    : replayed.evidence;
   return {
-    ...started,
+    ...replayed,
     status: (String(run.status || "pending") as WorkspaceSnapshot["status"]),
-    events: [...started.events, ...taskEvents],
+    events: [...replayed.events, ...taskEvents].slice(-500),
+    evidence,
     report: report ? { ...report, markdown: typeof run.final_report === "string" ? run.final_report : report.markdown } : fallbackReport,
+    agentReports,
   };
 }
 

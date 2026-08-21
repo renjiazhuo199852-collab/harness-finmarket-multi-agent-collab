@@ -52,6 +52,8 @@ export interface SwarmRunDetail extends SwarmRunMeta {
   final_report?: string | null;
   created_at?: string;
   completed_at?: string | null;
+  events?: Array<Record<string, unknown>>;
+  evidence_bundle?: Record<string, unknown> | null;
 }
 
 export interface ConnectionProbe {
@@ -133,6 +135,7 @@ export const api = {
     request<SessionItem>("/sessions", { method: "POST", body: JSON.stringify({ title }) }),
   listSessions: (limit = 50) => request<SessionItem[]>(`/sessions?limit=${limit}`),
   getSession: (id: string) => request<SessionItem>(`/sessions/${encodeURIComponent(id)}`),
+  deleteSession: (id: string) => request<{ status: string; session_id: string }>(`/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
   listSessionRuns: (id: string, limit = 50) => request<DebateRunSummary[]>(`/sessions/${encodeURIComponent(id)}/runs?limit=${limit}`),
   sendMessage: (id: string, content: string) =>
     request<{ message_id: string; attempt_id?: string }>(`/sessions/${encodeURIComponent(id)}/messages`, {
@@ -181,6 +184,10 @@ export const api = {
       agents: Array.isArray(data.agents) ? (data.agents as SwarmRunMeta["agents"]) : [],
       tasks: Array.isArray(data.tasks) ? (data.tasks as SwarmTask[]) : [],
       final_report: typeof data.final_report === "string" ? data.final_report : null,
+      events: Array.isArray(data.events) ? data.events as Array<Record<string, unknown>> : [],
+      evidence_bundle: data.evidence_bundle && typeof data.evidence_bundle === "object" && !Array.isArray(data.evidence_bundle)
+        ? data.evidence_bundle as Record<string, unknown>
+        : null,
     } satisfies SwarmRunDetail;
   },
   listPresets: () => request<SwarmPresetSummary[]>("/swarm/presets"),

@@ -21,6 +21,23 @@ describe("dynamic research progress model", () => {
     expect(progress.currentLabel).toBe("创建 FX Debate 协作运行");
   });
 
+  it("does not treat an intermediate report payload as the final result", () => {
+    let state = emptyRunWorkspace("session-intermediate-report");
+    state = applyRunEvent(state, { type: "attempt.started", data: { attempt_id: "a1" } });
+    state = applyRunEvent(state, {
+      type: "tool_call",
+      data: { tool: "run_fx_debate", arguments: { target: "EURUSD" } },
+    });
+    state = applyRunEvent(state, {
+      type: "tool_progress",
+      data: { report: { direction: "等待确认" } },
+    });
+
+    const progress = buildResearchProgress(state.pendingSnapshot);
+    expect(progress.stages.some((stage) => stage.kind === "result")).toBe(false);
+    expect(progress.currentLabel).toBe("创建 FX Debate 协作运行");
+  });
+
   it("derives FX execution layers from the real task dependencies", () => {
     let state = emptyRunWorkspace("session-1");
     state = applyRunEvent(state, {
@@ -52,6 +69,7 @@ describe("dynamic research progress model", () => {
     expect(execution[0].taskIds).toEqual(["bull", "bear", "macro"]);
     expect(execution[1].taskIds).toEqual(["risk"]);
     expect(execution[2].taskIds).toEqual(["judge"]);
+    expect(execution[2].label).toBe("辩论裁决与外汇组合经理");
     expect(execution[0].status).toBe("in_progress");
     expect(progress.activeAgents).toEqual(["pair_bull", "pair_bear"]);
     expect(progress.currentLabel).toBe("3 个任务并行执行");
@@ -144,6 +162,55 @@ describe("dynamic research progress model", () => {
       data: { run_id: "boundary-run", event: { type: "run_completed", data: { status: "failed" } } },
     });
     expect(buildResearchProgress(state.snapshots["boundary-run"]).stages.find((stage) => stage.kind === "execution")?.status).toBe("failed");
+  });
+
+  it("keeps a downstream stage from appearing complete while its dependency is still running", () => {
+    let state = emptyRunWorkspace("session-ordering");
+    state = applyRunEvent(state, {
+      type: "swarm.started",
+      data: {
+        run_id: "ordering-run",
+        preset: "fx_debate_team",
+        status: "running",
+        agents: [
+          { id: "research", role: "Research" },
+          { id: "risk", role: "Risk" },
+          { id: "judge", role: "Judge" },
+        ],
+        tasks: [
+          { id: "research-task", agent_id: "research", status: "in_progress", depends_on: [] },
+          { id: "risk-task", agent_id: "risk", status: "in_progress", depends_on: ["research-task"] },
+          // A late completion event may arrive before the dependency event.
+          { id: "judge-task", agent_id: "judge", status: "completed", depends_on: ["risk-task"] },
+        ],
+      },
+    });
+
+    const execution = buildResearchProgress(state.snapshots["ordering-run"]).stages
+      .filter((stage) => stage.kind === "execution");
+    expect(execution.map((stage) => stage.status)).toEqual(["in_progress", "in_progress", "pending"]);
+  });
+
+  it("reconciles stale task snapshots when the server has completed the run", () => {
+    const snapshot: WorkspaceSnapshot = {
+      sessionId: "session-terminal-snapshot",
+      runId: "terminal-snapshot-run",
+      status: "completed",
+      preset: "fx_debate_team",
+      variables: {},
+      agents: [],
+      tasks: [
+        { id: "research-task", agent_id: "research", status: "in_progress", depends_on: [] },
+        { id: "risk-task", agent_id: "risk", status: "pending", depends_on: ["research-task"] },
+        { id: "judge-task", agent_id: "judge", status: "pending", depends_on: ["risk-task"] },
+      ],
+      events: [],
+      evidence: { items: [] },
+      report: { direction: "等待确认" },
+    };
+
+    const execution = buildResearchProgress(snapshot).stages.filter((stage) => stage.kind === "execution");
+    expect(execution.map((stage) => stage.status)).toEqual(["completed", "completed", "completed"]);
   });
 
   it("uses a terminal label after a run completes", () => {

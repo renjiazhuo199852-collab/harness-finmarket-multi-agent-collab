@@ -350,7 +350,21 @@ def _merge_provider_row(
     """Flatten ``{data, metadata}`` rows without losing provenance."""
     data = row.get("data") if isinstance(row.get("data"), dict) else {}
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    return {**metadata_defaults, **metadata, **data}
+    # MCP evidence.v1 uses nested data/metadata. Preserve flat rows too so a
+    # cached response from the older public contract is not silently reduced
+    # to only synthetic defaults.
+    flat = row if not data and not metadata else {}
+    merged = {**metadata_defaults, **flat, **metadata, **data}
+    # Older MCP/public responses exposed the related-macro join role but
+    # dropped the country metadata. Keep those responses readable while the
+    # evidence contract supplies the canonical country column directly.
+    if not merged.get("country"):
+        role = str(merged.get("relationship_role") or "").strip().lower()
+        if role == "base_currency":
+            merged["country"] = "EU"
+        elif role == "quote_currency":
+            merged["country"] = "US"
+    return merged
 
 
 def _read_sheet(

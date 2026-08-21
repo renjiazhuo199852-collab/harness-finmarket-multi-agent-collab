@@ -19,6 +19,27 @@ from fastapi.responses import StreamingResponse
 _swarm_runtime = None
 
 
+def _public_evidence_bundle(run: Any) -> dict[str, Any] | None:
+    """Return the durable FX evidence bundle without exposing runtime context.
+
+    Evidence is frozen on the run record so historical data views remain
+    reproducible after the Session SSE connection is gone.  ``trusted_context``
+    may also contain resolved-request internals, therefore only the parsed
+    evidence bundle is projected through the public endpoint.
+    """
+    trusted_context = getattr(run, "trusted_context", None)
+    if not isinstance(trusted_context, dict):
+        return None
+    raw_bundle = trusted_context.get("evidence_bundle_json")
+    if not isinstance(raw_bundle, str) or not raw_bundle.strip():
+        return None
+    try:
+        bundle = json.loads(raw_bundle)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return bundle if isinstance(bundle, dict) else None
+
+
 def _get_swarm_runtime():
     """Lazy-init SwarmRuntime singleton."""
     global _swarm_runtime
@@ -155,7 +176,7 @@ def register_swarm_routes(
 
     @app.get("/swarm/runs/{run_id}", dependencies=[Depends(require_auth)])
     async def get_swarm_run(run_id: str):
-        """Swarm run detail including task statuses (reconciled)."""
+        """Swarm run detail including task statuses and persisted events."""
         _host_validate_path_param(run_id, "run_id")
         runtime = _get_swarm_runtime()
         loaded = runtime._store.load_run(run_id)
@@ -163,6 +184,9 @@ def register_swarm_routes(
             raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
         run = runtime._store.reconcile_run(loaded, write=True)
+        # The session EventBus is ephemeral. Include the durable run log so
+        # history views can reconstruct the full trace after a page reload.
+        events = [event.model_dump() for event in runtime._store.read_events(run.id)]
 
         from src.swarm.serialization import serialize_task
 
@@ -185,6 +209,8 @@ def register_swarm_routes(
             "created_at": run.created_at,
             "completed_at": run.completed_at,
             "final_report": run.final_report,
+            "events": events,
+            "evidence_bundle": _public_evidence_bundle(run),
         }
 
     @app.get(

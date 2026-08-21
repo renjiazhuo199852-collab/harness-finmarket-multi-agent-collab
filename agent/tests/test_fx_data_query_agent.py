@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from fastmcp.exceptions import McpError
+from mcp import types as mcp_types
 
 from src.fx_debate.context import build_evidence_context
 from src.fx_debate.data_query_agent import (
@@ -15,6 +17,8 @@ from src.fx_debate.data_query_agent import (
     FxDataQueryAgent,
     FxDataServiceError,
     McpAiSearchClient,
+    _build_mcp_child_env,
+    _load_mcp_dotenv,
 )
 from src.fx_debate.evidence_factory import FxEvidenceFactory
 from src.fx_debate.evidence_sources import AiSearchFxEvidenceSource
@@ -130,6 +134,93 @@ def test_direct_query_defaults_to_unified_search() -> None:
 
     assert seen == ["unified_search"]
     assert result["status"] == "success"
+
+
+def test_mcp_child_disables_fastmcp_update_check_without_losing_service_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP startup must not depend on PyPI/proxy configuration."""
+
+    monkeypatch.setenv("FASTMCP_CHECK_FOR_UPDATES", "stable")
+    child_env = _build_mcp_child_env({"AI_SEARCH_DB_HOST": "127.0.0.1"})
+
+    assert child_env["FASTMCP_CHECK_FOR_UPDATES"] == "off"
+    assert child_env["AI_SEARCH_DB_HOST"] == "127.0.0.1"
+
+
+def test_mcp_child_maps_existing_market_database_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The MCP service reuses the operator's existing local DB configuration."""
+
+    monkeypatch.setenv("MARKET_DB_HOST", "127.0.0.1")
+    monkeypatch.setenv("MARKET_DB_PORT", "15433")
+    monkeypatch.setenv("MARKET_DB_NAME", "icbc_shared")
+    monkeypatch.setenv("MARKET_DB_USER", "icbc_collab")
+    monkeypatch.setenv("MARKET_DB_PASSWORD", "local-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
+    monkeypatch.setenv("LANGCHAIN_MODEL_NAME", "Pro/zai-org/GLM-5.1")
+    for key in (
+        "AI_SEARCH_DB_HOST",
+        "AI_SEARCH_DB_PORT",
+        "AI_SEARCH_DB_NAME",
+        "AI_SEARCH_DB_USER",
+        "AI_SEARCH_DB_PASSWORD",
+        "LLM_API_KEY",
+        "EMBEDDING_API_KEY",
+        "LLM_BASE_URL",
+        "LLM_MODEL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    child_env = _build_mcp_child_env({})
+
+    assert child_env["AI_SEARCH_DB_HOST"] == "127.0.0.1"
+    assert child_env["AI_SEARCH_DB_PORT"] == "15433"
+    assert child_env["AI_SEARCH_DB_NAME"] == "icbc_shared"
+    assert child_env["AI_SEARCH_DB_USER"] == "icbc_collab"
+    assert child_env["AI_SEARCH_DB_PASSWORD"] == "local-secret"
+    assert child_env["LLM_API_KEY"] == "provider-secret"
+    assert child_env["EMBEDDING_API_KEY"] == "provider-secret"
+    assert child_env["LLM_BASE_URL"] == "https://api.siliconflow.cn/v1"
+    assert child_env["LLM_MODEL"] == "Pro/zai-org/GLM-5.1"
+
+
+def test_mcp_repository_env_overrides_inherited_provider_settings(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "EMBEDDING_MODEL=doubao-embedding-vision\n"
+        "EMBEDDING_API_KEY=ark-test-key\n",
+        encoding="utf-8",
+    )
+
+    assert _load_mcp_dotenv(env_file) == {
+        "EMBEDDING_MODEL": "doubao-embedding-vision",
+        "EMBEDDING_API_KEY": "ark-test-key",
+    }
+
+
+def test_mcp_connection_closed_is_exposed_as_structured_service_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crashed MCP child must not escape as an unhandled raw exception."""
+
+    client = McpAiSearchClient(
+        sys.executable,
+        [],
+        working_directory=str(Path(__file__).parent),
+    )
+    error = McpError(
+        mcp_types.ErrorData(code=mcp_types.CONNECTION_CLOSED, message="Connection closed")
+    )
+
+    async def fail(_payload: dict[str, object], *, trace_id: str) -> dict[str, object]:
+        raise error
+
+    monkeypatch.setattr(client, "_call_mcp", fail)
+
+    with pytest.raises(FxDataServiceError, match="Connection closed") as raised:
+        client.search("unified_search", "查询 EURUSD 最新价格")
+    assert raised.value.code == "FX_DATA_SERVICE_UNAVAILABLE"
 
 
 def test_mcp_client_uses_stdio_and_only_unified_search() -> None:
@@ -255,6 +346,39 @@ def test_evidence_source_maps_provider_metadata_into_raw_snapshot() -> None:
     assert snapshot.news[0]["article_id"] == "n-1"
     bundle = FxEvidenceFactory().build(_context(), AiSearchFxEvidenceSource(client=_Client()))
     assert bundle.source_name == "ai_search"
+
+
+def test_evidence_source_maps_legacy_related_macro_role_to_country() -> None:
+    """Old MCP rows remain usable when only relationship_role is present."""
+
+    class _Client:
+        def search(self, _tool, query, **_kwargs):
+            if "最新价格" in query:
+                return {"status": "success", "data": []}
+            if "日线" in query:
+                return {"status": "success", "data": []}
+            if "宏观" in query:
+                return {
+                    "status": "success",
+                    "data": [
+                        {
+                            "metric_id": "EU_CPI_YOY",
+                            "relationship_role": "base_currency",
+                            "value": "2.4",
+                            "forecast_value": "2.3",
+                        },
+                        {
+                            "metric_id": "US_CPI_YOY",
+                            "relationship_role": "quote_currency",
+                            "value": "3.1",
+                            "forecast_value": "3.0",
+                        },
+                    ],
+                }
+            return {"status": "success", "data": []}
+
+    snapshot = AiSearchFxEvidenceSource(client=_Client()).load(_context())
+    assert {row["country"] for row in snapshot.macro} == {"EU", "US"}
 
 
 def test_top_level_query_tool_is_opt_in(monkeypatch) -> None:

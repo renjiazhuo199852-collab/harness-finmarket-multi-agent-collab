@@ -41,6 +41,20 @@ function readableIdentifier(value: string): string {
     .join(" ");
 }
 
+function canonicalAgentId(value: string): string {
+  return value === "risk_officer" ? "fx_risk_officer" : value;
+}
+
+function fxRoleLabel(agentId: string): string | undefined {
+  return {
+    pair_bull: "多头观点分析师",
+    pair_bear: "空头观点分析师",
+    macro_technical: "宏观与技术分析师",
+    fx_risk_officer: "外汇风险分析师",
+    debate_judge: "辩论裁决与外汇组合经理",
+  }[canonicalAgentId(agentId)];
+}
+
 function presetLabel(preset?: string): string {
   return preset ? readableIdentifier(preset) : "协作运行";
 }
@@ -52,6 +66,36 @@ function agentForTask(task: SwarmTask, agents: AgentSnapshot[]): AgentSnapshot |
 
 function liveTaskStatus(task: SwarmTask, agents: AgentSnapshot[]): string {
   return agentForTask(task, agents)?.status || task.status || "pending";
+}
+
+function dependencyAwareTaskStatus(
+  task: SwarmTask,
+  tasksById: Map<string, SwarmTask>,
+  agents: AgentSnapshot[],
+  runStatus: WorkspaceSnapshot["status"],
+  visiting = new Set<string>(),
+): string {
+  // The server's terminal run status is authoritative. A historical run may
+  // contain a stale task snapshot from before the final task-store sync.
+  if (runStatus === "completed") return "completed";
+
+  const rawStatus = liveTaskStatus(task, agents);
+  if (rawStatus !== "completed" || visiting.has(task.id)) return rawStatus;
+
+  // A late task.completed event must not make a downstream layer appear done
+  // while one of its declared dependencies is still running or blocked.
+  const nextVisiting = new Set(visiting).add(task.id);
+  const dependencyPending = (task.depends_on || [])
+    .map((dependencyId) => tasksById.get(dependencyId))
+    .filter(Boolean)
+    .some((dependency) => dependencyAwareTaskStatus(
+      dependency as SwarmTask,
+      tasksById,
+      agents,
+      runStatus,
+      nextVisiting,
+    ) !== "completed");
+  return dependencyPending ? "pending" : rawStatus;
 }
 
 function taskLayers(tasks: SwarmTask[]): SwarmTask[][] {
@@ -78,11 +122,18 @@ function taskLayers(tasks: SwarmTask[]): SwarmTask[][] {
 }
 
 function taskStages(workspace: WorkspaceSnapshot): ResearchProgressStage[] {
+  const tasksById = new Map(workspace.tasks.map((task) => [task.id, task]));
   return taskLayers(workspace.tasks).map((tasks, index) => {
     const agents = tasks.map((task) => agentForTask(task, workspace.agents));
-    const roles = agents.map((agent, taskIndex) => agent?.role || readableIdentifier(tasks[taskIndex].agent_id));
+    const roles = tasks.map((task, taskIndex) => {
+      const agentId = canonicalAgentId(task.agent_id);
+      return fxRoleLabel(agentId) || agents[taskIndex]?.role || readableIdentifier(task.agent_id);
+    });
     const taskIds = tasks.map((task) => task.id);
-    const agentIds = tasks.map((task, taskIndex) => agents[taskIndex]?.id || task.agent_id);
+    // Render cards from the task's declared agent ID. Agent snapshots can be
+    // updated by late events, but the persisted DAG is the source of truth for
+    // which node belongs to each execution layer.
+    const agentIds = tasks.map((task) => canonicalAgentId(task.agent_id));
     return {
       id: `execution-${index}-${taskIds.join("-")}`,
       kind: "execution",
@@ -90,7 +141,10 @@ function taskStages(workspace: WorkspaceSnapshot): ResearchProgressStage[] {
       detail: tasks.length === 1
         ? `${roles[0]}负责本阶段，依赖关系来自服务端运行计划`
         : roles.join("、"),
-      status: stageStatus(tasks.map((task) => liveTaskStatus(task, workspace.agents)), workspace.status),
+      status: stageStatus(
+        tasks.map((task) => dependencyAwareTaskStatus(task, tasksById, workspace.agents, workspace.status)),
+        workspace.status,
+      ),
       agentIds: [...new Set(agentIds)],
       taskIds,
     };
@@ -173,7 +227,9 @@ function contextStages(workspace: WorkspaceSnapshot): ResearchProgressStage[] {
 }
 
 function resultStages(workspace: WorkspaceSnapshot, execution: ResearchProgressStage[]): ResearchProgressStage[] {
-  if (workspace.report) {
+  // Reports can appear on intermediate tool/progress events before the run
+  // has emitted its terminal status. They are not user-visible final output.
+  if (workspace.status === "completed" && workspace.report) {
     return [{
       id: "result",
       kind: "result",

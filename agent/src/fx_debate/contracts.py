@@ -64,12 +64,12 @@ class ToolCallTrace(_Contract):
                 return {"tool_name": tool_name, "query_id": value}
             return value
         normalized = dict(value)
-        tool_name = normalized.get("tool_name") or normalized.get("tool")
+        tool_name = normalized.get("tool_name") or normalized.get("tool") or normalized.get("call")
         query_id = normalized.get("query_id") or normalized.get("call_id")
         if tool_name:
             normalized["tool_name"] = str(tool_name)
         normalized["query_id"] = str(query_id or tool_name or "unspecified")
-        for key in ("status", "tool", "purpose", "operation"):
+        for key in ("status", "tool", "purpose", "operation", "call", "params", "result_evidence_ids"):
             normalized.pop(key, None)
         return normalized
 
@@ -95,6 +95,27 @@ class CausalChain(_Contract):
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
+        # A deployed prompt version emitted typed ``steps`` instead of the
+        # canonical V2 chain fields. Preserve its text and evidence IDs.
+        steps = normalized.pop("steps", None)
+        if isinstance(steps, list):
+            step_text: dict[str, str] = {}
+            step_evidence: list[str] = []
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                step_type = str(step.get("step_type") or step.get("type") or "").lower()
+                description = str(step.get("description") or step.get("statement") or "").strip()
+                if step_type and description:
+                    step_text[step_type] = description
+                step_evidence.extend(str(item) for item in (step.get("evidence_ids") or []) if item)
+            normalized.setdefault("observed_fact", step_text.get("observed_fact", ""))
+            normalized.setdefault("inference", step_text.get("inference", ""))
+            normalized.setdefault("transmission_mechanism", step_text.get("transmission", ""))
+            normalized.setdefault("effective_window", step_text.get("window", ""))
+            normalized.setdefault("expected_effect", step_text.get("expected_effect", normalized.get("direction", "down")))
+            if step_evidence:
+                normalized.setdefault("evidence_ids", list(dict.fromkeys(step_evidence)))
         drivers = normalized.pop("driver", [])
         observed_facts = normalized.pop("observed_facts", [])
         if observed_facts and not drivers:
@@ -134,7 +155,7 @@ class CausalChain(_Contract):
                     str(normalized.get("observed_fact") or ""),
                 )
         normalized["claim_id"] = normalized.get("claim_id") or normalized.get(
-            "chain_id", "chain-1"
+            "chain_id", normalized.get("id", "chain-1")
         )
         normalized["transmission_mechanism"] = normalized.get(
             "transmission_mechanism", normalized.pop("transmission", "")
@@ -149,6 +170,11 @@ class CausalChain(_Contract):
             )
         for key in (
             "chain_id",
+            "id",
+            "label",
+            "direction",
+            "strength",
+            "steps",
             "driver",
             "observed_facts",
             "driver_type",
@@ -336,6 +362,7 @@ class HypothesisArgumentV2(_Contract):
             normalized["summary"] = str(summary)
 
         chains = []
+        dropped_chain = False
         seen_claim_ids: set[str] = set()
         for index, item in enumerate(
             normalized.get("causal_chains", []) or [], start=1
@@ -343,7 +370,7 @@ class HypothesisArgumentV2(_Contract):
             if isinstance(item, dict):
                 chain = dict(item)
                 chain["claim_id"] = _unique_identifier(
-                    chain.get("claim_id") or chain.get("chain_id"),
+                    chain.get("claim_id") or chain.get("chain_id") or chain.get("id"),
                     seen=seen_claim_ids,
                     fallback=f"{role}-chain-{index}",
                 )
@@ -355,8 +382,12 @@ class HypothesisArgumentV2(_Contract):
                     chain["expected_effect"] = direction
                 chains.append(chain)
             else:
-                chains.append(item)
+                # Do not let a prose-only chain crash the whole DAG. It has
+                # no auditable evidence, so downgrade the hypothesis below.
+                dropped_chain = True
         normalized["causal_chains"] = chains
+        if dropped_chain and normalized.get("hypothesis_status") == "supported":
+            normalized["hypothesis_status"] = "weak"
 
         fallback_evidence_ids: list[str] = []
         for key in (
@@ -400,35 +431,35 @@ class HypothesisArgumentV2(_Contract):
                 continue
             if not isinstance(item, dict):
                 continue
-            condition = dict(item)
-            condition["metric"] = condition.get("metric") or "qualitative_condition"
-            condition["operator"] = (
-                condition.get("operator")
-                if condition.get("operator")
-                in {"<", "<=", ">", ">=", "==", "changes_to"}
-                else "changes_to"
-            )
-            condition["threshold"] = (
-                condition.get("threshold")
-                or condition.get("condition")
-                or condition.get("description")
-                or condition.get("rationale")
-                or "condition changes"
-            )
-            condition["evidence_family_id"] = (
-                condition.get("evidence_family_id") or "unscoped"
-            )
-            for key in (
-                "condition",
-                "measurement",
-                "rationale",
-                "description",
-                "evidence_ids",
-                "measurable_signal",
-            ):
-                condition.pop(key, None)
+            raw_condition = dict(item)
+            condition = {
+                "metric": raw_condition.get("metric") or "qualitative_condition",
+                "operator": (
+                    raw_condition.get("operator")
+                    if raw_condition.get("operator")
+                    in {"<", "<=", ">", ">=", "==", "changes_to"}
+                    else "changes_to"
+                ),
+                "threshold": (
+                    raw_condition.get("threshold")
+                    or raw_condition.get("condition")
+                    or raw_condition.get("description")
+                    or raw_condition.get("rationale")
+                    or "condition changes"
+                ),
+                "valid_until": raw_condition.get("valid_until"),
+                "evidence_family_id": raw_condition.get("evidence_family_id") or "unscoped",
+            }
             normalized_invalidations.append(condition)
         normalized["invalidation_conditions"] = normalized_invalidations
+        missing_data = normalized.get("missing_data", []) or []
+        if not isinstance(missing_data, list):
+            missing_data = [missing_data]
+        normalized["missing_data"] = [
+            _statement_text(item) or str(item)
+            for item in missing_data
+            if _statement_text(item) or isinstance(item, (str, int, float))
+        ]
         # Some model runs echo the frozen context timestamp at the top level.
         # It is metadata already carried by the Tool argument, not part of V2.
         normalized.pop("as_of", None)
@@ -464,6 +495,8 @@ class HypothesisArgumentV2(_Contract):
                 ]
             normalized["coverage"].pop("as_of", None)
         tool_calls = normalized.get("tool_calls", []) or []
+        if not isinstance(tool_calls, list):
+            tool_calls = [tool_calls]
         normalized["tool_calls"] = tool_calls
         return normalized
 
@@ -608,6 +641,18 @@ class RelativeStateV2(_Contract):
                 finding.pop(key, None)
             findings.append(finding)
         normalized["findings"] = findings
+        missing_data = normalized.get("missing_data", []) or []
+        if not isinstance(missing_data, list):
+            missing_data = [missing_data]
+        normalized["missing_data"] = [
+            _statement_text(item) or str(item)
+            for item in missing_data
+            if _statement_text(item) or isinstance(item, (str, int, float))
+        ]
+        tool_calls = normalized.get("tool_calls", []) or []
+        if not isinstance(tool_calls, list):
+            tool_calls = [tool_calls]
+        normalized["tool_calls"] = tool_calls
         return normalized
 
     @model_validator(mode="after")

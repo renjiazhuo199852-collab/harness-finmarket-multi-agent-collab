@@ -298,7 +298,7 @@ const ROLE_LABELS: Record<string, string> = {
   pair_bull: "货币对多头分析师",
   pair_bear: "货币对空头分析师",
   macro_technical: "宏观与技术分析师",
-  fx_risk_officer: "外汇风险官",
+  fx_risk_officer: "外汇风险分析师",
   debate_judge: "辩论裁决与外汇组合经理",
   geopolitical_analyst: "地缘政治分析师",
   energy_analyst: "能源冲击分析师",

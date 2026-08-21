@@ -616,6 +616,7 @@ class SwarmRuntime:
                     run_id=run.id,
                     include_shell_tools=include_shell_tools,
                     grounding_block=grounding_block,
+                    cancel_checker=cancel_event.is_set,
                 )
                 futures[future] = tid
                 per_task_budget = agent_spec.timeout_seconds * (agent_spec.max_retries + 1)
@@ -674,6 +675,7 @@ class SwarmRuntime:
         run_id: str,
         include_shell_tools: bool = False,
         grounding_block: str = "",
+        cancel_checker: Callable[[], bool] | None = None,
     ) -> WorkerResult:
         """Run a worker with automatic retry on failure.
 
@@ -703,6 +705,14 @@ class SwarmRuntime:
         result: WorkerResult | None = None
 
         for attempt in range(max_retries + 1):
+            if cancel_checker is not None and cancel_checker():
+                return WorkerResult(
+                    status="failed",
+                    summary="",
+                    error="cancelled by user",
+                    input_tokens=cumulative_input_tokens,
+                    output_tokens=cumulative_output_tokens,
+                )
             if attempt > 0:
                 self._emit_event(
                     run_id,
@@ -734,6 +744,7 @@ class SwarmRuntime:
                 include_shell_tools=include_shell_tools,
                 grounding_block=grounding_block,
                 agent_config=self._agent_config,
+                cancel_checker=cancel_checker,
             )
 
             cumulative_input_tokens += result.input_tokens

@@ -30,8 +30,8 @@ def test_stdio_server_exposes_only_unified_search() -> None:
     assert asyncio.run(run()) == ["unified_search"]
 
 
-def test_unified_search_forwards_complete_stage_through_progress(monkeypatch) -> None:
-    """MCP 工具结果保持精简，同时通过 progress 发送完整阶段对象。"""
+def test_unified_search_returns_evidence_provenance_and_progress(monkeypatch) -> None:
+    """MCP preserves evidence metadata while progress carries full stages."""
 
     from backend import mcp_server
 
@@ -59,7 +59,19 @@ def test_unified_search_forwards_complete_stage_through_progress(monkeypatch) ->
             "execution": {
                 "status": "resolved",
                 "adapter": "news_articles",
-                "rows": [],
+                "rows": [
+                    {
+                        "data": {"title": "EURUSD 新闻"},
+                        "metadata": {
+                            "article_id": "n-1",
+                            "publish_time": "2026-08-17T00:00:00+00:00",
+                            "source": "LSEG",
+                        },
+                    }
+                ],
+                "row_count": 1,
+                "dataset_id": "LSEG_NEWS",
+                "storage_table_name": "news_articles",
             },
         }
 
@@ -72,7 +84,10 @@ def test_unified_search_forwards_complete_stage_through_progress(monkeypatch) ->
         )
     )
 
-    assert result == {"status": "success", "data": []}
+    assert result["status"] == "success"
+    assert result["schema_version"] == "fx-evidence.v1"
+    assert result["data"][0]["metadata"]["article_id"] == "n-1"
+    assert result["meta"]["dataset_id"] == "LSEG_NEWS"
     assert len(progress_messages) == 1
     assert '"type": "mcp_stage"' in progress_messages[0]
     assert '"stage": "dataset_catalog"' in progress_messages[0]

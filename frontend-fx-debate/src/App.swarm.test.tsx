@@ -193,7 +193,7 @@ describe("Swarm catalog UI", () => {
 
     await screen.findByText("团队详情");
     expect(screen.getAllByText("货币对多头分析师").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("外汇风险官").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("外汇风险分析师").length).toBeGreaterThan(0);
     expect(screen.getByText("第 2 阶段")).toBeTruthy();
     expect(screen.getByText("第 3 阶段")).toBeTruthy();
     expect(container.querySelectorAll(".swarm-layer-body")).toHaveLength(3);

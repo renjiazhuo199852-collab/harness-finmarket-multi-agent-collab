@@ -66,6 +66,9 @@ def _get_session_service():
         event_bus=event_bus,
         runs_dir=runs_dir,
     )
+    # Attempts are process-local. Close records left pending/running by a
+    # previous API process before exposing them through Session endpoints.
+    _session_service.reconcile_incomplete_attempts()
     _set_host_attr("_session_service", _session_service)
     return _session_service
 

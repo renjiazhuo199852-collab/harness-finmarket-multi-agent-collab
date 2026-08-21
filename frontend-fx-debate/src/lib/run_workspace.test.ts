@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeSnapshot, applyRunEvent, emptyRunWorkspace, markActiveRunCancelled, selectRun } from "@/lib/run_workspace";
+import { activeSnapshot, applyRunEvent, emptyRunWorkspace, hydrateReportsFromMessages, hydrateRunSnapshot, markActiveRunCancelled, needsRunHydration, selectRun } from "@/lib/run_workspace";
 import type { SessionEvent } from "@/types";
 
 const started = (runId: string): SessionEvent => ({
@@ -43,6 +43,31 @@ describe("RunWorkspaceState", () => {
       "tool_call",
       "swarm.started",
     ]);
+  });
+
+  it("carries the context preview into the run that is announced afterward", () => {
+    let state = emptyRunWorkspace("session-ai-search");
+    state = applyRunEvent(state, {
+      id: "context-ai-search",
+      type: "fx_debate.context_ready",
+      data: {
+        type: "context_ready",
+        data: {
+          source: "ai_search",
+          data_preview: {
+            source: "ai_search",
+            domains: {
+              market: { count: 1, rows: [{ evidence_id: "quote-1", name: "spot_quote", value: 1.16 }] },
+            },
+          },
+        },
+      },
+    });
+    state = applyRunEvent(state, started("swarm-ai-search"));
+
+    expect(activeSnapshot(state).runId).toBe("swarm-ai-search");
+    expect(activeSnapshot(state).evidence.source).toBe("ai_search");
+    expect(activeSnapshot(state).evidence.items[0]?.id).toBe("quote-1");
   });
 
   it("streams worker text into the matching Agent snapshot", () => {
@@ -138,5 +163,48 @@ describe("RunWorkspaceState", () => {
     state = markActiveRunCancelled(state);
     expect(activeSnapshot(state).status).toBe("cancelled");
     expect(state.summaries[0]?.status).toBe("cancelled");
+  });
+
+  it("uses the persisted assistant report when a run record has no report", () => {
+    let state = hydrateRunSnapshot(emptyRunWorkspace("session-history"), {
+      id: "swarm-history",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [],
+      tasks: [],
+      final_report: null,
+    });
+    state = hydrateReportsFromMessages(state, [{
+      message_id: "assistant-1",
+      session_id: "session-history",
+      role: "assistant",
+      content: "# EURUSD\n\n方向：等待",
+      created_at: "2026-08-20T00:00:00Z",
+      metadata: { swarm_run_id: "swarm-history" },
+    }]);
+
+    expect(activeSnapshot(state).report?.markdown).toContain("EURUSD");
+  });
+
+  it("keeps report-only history fallbacks eligible for durable run hydration", () => {
+    let state = hydrateRunSnapshot(emptyRunWorkspace("session-history"), {
+      id: "swarm-history",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [],
+      tasks: [],
+      final_report: "# EURUSD",
+    });
+    expect(needsRunHydration(state.snapshots["swarm-history"])).toBe(true);
+    state = hydrateRunSnapshot(state, {
+      id: "swarm-history",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [{ id: "pair_bull", role: "Pair Bull" }],
+      tasks: [{ id: "task-1", agent_id: "pair_bull", status: "completed" }],
+      events: [{ type: "run_completed", data: { status: "completed" } }],
+      final_report: "# EURUSD",
+    });
+    expect(needsRunHydration(state.snapshots["swarm-history"])).toBe(false);
   });
 });

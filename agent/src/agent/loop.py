@@ -237,6 +237,48 @@ def _redact_trace_result(result: str) -> str:
     return json.dumps(redact_payload(payload), ensure_ascii=False)
 
 
+def _tool_context_payload(tool_name: str, result: str) -> str:
+    """Build a compact, authoritative context payload for large FX results.
+
+    FX Debate keeps a detailed evidence preview for the UI and audit trail,
+    but that preview can be much larger than the AgentLoop tool-context cap.
+    The model must see the validated decision/report first; otherwise it may
+    infer a new trade plan from a truncated fragment of raw rows.
+    """
+    if tool_name not in {"run_fx_debate", "run_swarm"}:
+        return result[:TOOL_RESULT_LIMIT]
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return result[:TOOL_RESULT_LIMIT]
+    if not isinstance(payload, dict) or payload.get("status") != "completed":
+        return result[:TOOL_RESULT_LIMIT]
+    preview = payload.get("data_preview")
+    compact = {
+        "ok": payload.get("ok"),
+        "status": payload.get("status"),
+        "run_id": payload.get("run_id"),
+        "evidence_context_id": payload.get("evidence_context_id"),
+        "preset": payload.get("preset"),
+        "data_source_policy": payload.get("data_source_policy"),
+        "grounding": (
+            "以下 decision 和 report_markdown 是已通过证据上下文校验的权威结果。"
+            "只能据此回答，不得从缺失字段、常识或训练记忆补造价格、时间、指标或交易点位。"
+        ),
+        "decision": payload.get("decision"),
+        "report_markdown": payload.get("report_markdown"),
+        "data_summary": {
+            "counts": preview.get("counts") if isinstance(preview, dict) else None,
+            "raw_counts": preview.get("raw_counts") if isinstance(preview, dict) else None,
+            "manifest": preview.get("manifest") if isinstance(preview, dict) else None,
+            "derived": preview.get("derived") if isinstance(preview, dict) else None,
+        },
+        "warnings": payload.get("warnings", []),
+        "errors": payload.get("errors", []),
+    }
+    return json.dumps(compact, ensure_ascii=False)
+
+
 def _format_timeout(seconds: float) -> str:
     """Return a human-readable timeout label."""
     if seconds < 1:
@@ -573,6 +615,7 @@ class AgentLoop:
         self._persistent_memory = persistent_memory
         self._run_iteration: int = 0
         self._has_run = False
+        self._terminal_tool_error: str | None = None
 
     def cancel(self) -> None:
         """Cancel the current loop.
@@ -616,6 +659,7 @@ class AgentLoop:
             self._has_run = True
         self._called_ok = set()
         self._previous_summary = ""
+        self._terminal_tool_error = None
 
         state_store = RunStateStore()
         RUNS_DIR.mkdir(parents=True, exist_ok=True)
@@ -673,6 +717,7 @@ class AgentLoop:
         empty_model_response_iter: int | None = None
         llm_usage_summary = _new_llm_usage_summary(self.llm)
         goal_continuations = 0
+        terminal_tool_reason: str | None = None
         goal_last_progress: tuple[int, int] | None = None
         wrap_up_at = max(1, int(self.max_iterations * 0.8))
 
@@ -1059,6 +1104,14 @@ class AgentLoop:
                     current_iter,
                 )
 
+                # FX Debate errors are terminal for this user turn.  They are
+                # deliberately not fed back to the model as a normal tool
+                # result, otherwise the planner may silently switch routes or
+                # start a second FX run after the canonical run failed.
+                if self._terminal_tool_error:
+                    terminal_tool_reason = self._terminal_tool_error
+                    break
+
                 # Layer 3: compress after all tools have executed
                 if compact_requested:
                     logger.info("Manual compact triggered by model")
@@ -1108,6 +1161,10 @@ class AgentLoop:
             final_reason = "cancelled by user"
             state_store.mark_failure(run_dir, final_reason)
             final_status = "cancelled"
+        elif terminal_tool_reason:
+            final_reason = terminal_tool_reason
+            state_store.mark_failure(run_dir, final_reason)
+            final_status = "failed"
         elif content_filter_circuit_breaker:
             final_reason = (
                 f"content_filter_circuit_breaker: "
@@ -1610,13 +1667,46 @@ class AgentLoop:
         """
         self._update_memory(tc.name)
 
+        if tc.name in {"run_fx_debate", "run_swarm"}:
+            try:
+                payload = json.loads(result)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = None
+            terminal_fx_codes = {
+                "FX_DATA_UNAVAILABLE",
+                "FX_ROUTE_INVALID",
+                "FX_DEBATE_FAILED",
+                "FX_DEBATE_CANCELLED",
+                "INVALID_RESOLVED_REQUEST",
+            }
+            if (
+                isinstance(payload, dict)
+                and payload.get("route") == "fx_debate"
+                and payload.get("status") == "error"
+                and (
+                    payload.get("terminal") is True
+                    or payload.get("code") in terminal_fx_codes
+                    or (
+                        isinstance(payload.get("error"), dict)
+                        and payload["error"].get("code") in terminal_fx_codes
+                    )
+                )
+            ):
+                error = payload.get("error")
+                if isinstance(error, dict):
+                    code = str(error.get("code") or payload.get("code") or "FX_DEBATE_FAILED")
+                    message = str(error.get("message") or payload.get("message") or "FX Debate 未完成")
+                    self._terminal_tool_error = f"{code}: {message}"
+                else:
+                    self._terminal_tool_error = str(payload.get("message") or "FX Debate 未完成")
+
         success = _is_tool_success(result)
         if success:
             self._called_ok.add(tc.name)
 
         status = "ok" if success else "error"
-        truncated = result[:TOOL_RESULT_LIMIT]
-        messages.append(context.format_tool_result(tc.id, tc.name, truncated))
+        context_result = _tool_context_payload(tc.name, result)
+        messages.append(context.format_tool_result(tc.id, tc.name, context_result))
 
         trace_result = _redact_trace_result(result)
         trace.write_tool_result(

@@ -1,5 +1,5 @@
-import type { DebateRunSummary, SessionEvent, WorkspaceSnapshot } from "@/types";
-import { applySessionEvent, emptySnapshot, fromStarted, hydrateRun } from "@/lib/workspace";
+import type { DebateRunSummary, MessageItem, SessionEvent, WorkspaceSnapshot } from "@/types";
+import { applySessionEvent, emptySnapshot, fromStarted, hydrateHistoricalMessage, hydrateRun } from "@/lib/workspace";
 
 export interface RunWorkspaceState {
   sessionId?: string;
@@ -69,12 +69,46 @@ export function replaceRunSummaries(state: RunWorkspaceState, summaries: DebateR
 export function hydrateRunSnapshot(state: RunWorkspaceState, run: Record<string, unknown>): RunWorkspaceState {
   const snapshot = hydrateRun(state.sessionId, run);
   const summary = summaryFromRun(state.sessionId, run);
+  const existing = snapshot.runId ? state.snapshots[snapshot.runId] : undefined;
+  const mergedSnapshot = existing?.report && !snapshot.report ? { ...snapshot, report: existing.report } : snapshot;
   return {
     ...state,
-    activeRunId: snapshot.runId || state.activeRunId,
+    activeRunId: mergedSnapshot.runId || state.activeRunId,
     summaries: [...state.summaries.filter((item) => item.run_id !== summary.run_id), summary].sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || ""))),
-    snapshots: snapshot.runId ? { ...state.snapshots, [snapshot.runId]: snapshot } : state.snapshots,
+    snapshots: mergedSnapshot.runId ? { ...state.snapshots, [mergedSnapshot.runId]: mergedSnapshot } : state.snapshots,
   };
+}
+
+/** Restore reports from persisted assistant messages for older/incomplete run records. */
+export function hydrateReportsFromMessages(state: RunWorkspaceState, messages: MessageItem[]): RunWorkspaceState {
+  if (!messages.length) return state;
+  const assistantMessages = messages.filter((message) => message.role === "assistant");
+  let changed = false;
+  const snapshots: Record<string, WorkspaceSnapshot> = { ...state.snapshots };
+  for (const summary of state.summaries) {
+    const runId = summary.run_id;
+    const message = assistantMessages.find((candidate) => {
+      const metadata = candidate.metadata || {};
+      return metadata.swarm_run_id === runId || metadata.run_id === runId;
+    });
+    if (!message) continue;
+    const current = snapshots[runId];
+    const historical = hydrateHistoricalMessage(state.sessionId, message);
+    if (current) {
+      if (current.report) continue;
+      snapshots[runId] = { ...current, report: historical.report };
+    } else {
+      snapshots[runId] = {
+        ...historical,
+        runId,
+        preset: summary.preset || historical.preset,
+        status: (summary.status as WorkspaceSnapshot["status"]) || historical.status,
+        variables: Object.fromEntries(Object.entries(summary.variables || {}).map(([key, value]) => [key, String(value)])),
+      };
+    }
+    changed = true;
+  }
+  return changed ? { ...state, snapshots } : state;
 }
 
 export function applyRunEvent(state: RunWorkspaceState, event: SessionEvent): RunWorkspaceState {
@@ -127,6 +161,12 @@ export function applyRunEvent(state: RunWorkspaceState, event: SessionEvent): Ru
 export function selectRun(state: RunWorkspaceState, runId: string): RunWorkspaceState {
   if (!state.summaries.some((summary) => summary.run_id === runId) && !state.snapshots[runId]) return state;
   return { ...state, activeRunId: runId };
+}
+
+/** A report-only fallback is useful, but it is not a complete historical run. */
+export function needsRunHydration(snapshot: WorkspaceSnapshot | undefined): boolean {
+  if (!snapshot) return true;
+  return snapshot.tasks.length === 0 && snapshot.events.length <= 1;
 }
 
 export function activeSnapshot(state: RunWorkspaceState): WorkspaceSnapshot {

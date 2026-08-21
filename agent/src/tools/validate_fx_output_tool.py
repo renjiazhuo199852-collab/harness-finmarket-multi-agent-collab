@@ -70,6 +70,11 @@ class ValidateFxOutputTool(_FxContextTool):
     }
     repeatable = True
 
+    @classmethod
+    def check_available(cls) -> bool:
+        """Validation reads the frozen EvidenceBundle and is source-agnostic."""
+        return True
+
     def __init__(
         self,
         *,

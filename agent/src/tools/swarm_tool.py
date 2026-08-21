@@ -626,6 +626,8 @@ def _format_fx_route_error(decision: FxRouteDecision) -> str:
         {
             "status": "error",
             "route": "fx_debate",
+            "terminal": True,
+            "retryable": False,
             "code": decision.reason_code or "FX_ROUTE_INVALID",
             "message": decision.message or "FX Debate 请求无法解析。",
         },
@@ -637,6 +639,7 @@ def _execute_fx_debate_request(
     decision: FxRouteDecision,
     *,
     event_callback: Any | None,
+    cancel_checker: Any | None = None,
 ) -> str:
     """Delegate a resolved natural-language request to the canonical FX tool."""
     assert decision.request is not None
@@ -670,6 +673,7 @@ def _execute_fx_debate_request(
 
     tool = RunFxDebateTool(
         event_callback=adapt_fx_debate_event_callback(event_callback),
+        cancel_checker=cancel_checker,
     )
     return tool.execute(
         target=decision.request.target,
@@ -769,6 +773,7 @@ class SwarmTool(BaseTool):
         *,
         include_shell_tools: bool = False,
         event_callback: Any | None = None,
+        cancel_checker: Any | None = None,
     ) -> None:
         """Initialize the swarm launcher.
 
@@ -779,6 +784,7 @@ class SwarmTool(BaseTool):
         """
         self.include_shell_tools = include_shell_tools
         self._event_callback = event_callback
+        self._cancel_checker = cancel_checker
 
     def _emit_session_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Forward swarm status to the hosting session SSE channel if present."""
@@ -819,9 +825,19 @@ class SwarmTool(BaseTool):
                 fx_decision.request.target if fx_decision.request else None,
                 fx_decision.request.timeframe if fx_decision.request else None,
             )
+            # Keep the lightweight helper signature compatible with callers
+            # and test doubles that predate cancellation propagation. The
+            # production registry always injects a checker when cancellation
+            # needs to reach the FX runtime.
+            if self._cancel_checker is None:
+                return _execute_fx_debate_request(
+                    fx_decision,
+                    event_callback=self._event_callback,
+                )
             return _execute_fx_debate_request(
                 fx_decision,
                 event_callback=self._event_callback,
+                cancel_checker=self._cancel_checker,
             )
 
         preset, preset_error = _resolve_preset(prompt, explicit_preset)

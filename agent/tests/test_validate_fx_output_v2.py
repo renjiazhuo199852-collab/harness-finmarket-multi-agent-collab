@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 
 from src.fx_debate.context import build_evidence_context
+from src.fx_debate.contracts import HypothesisArgumentV2, RelativeStateV2
 from src.fx_debate.models import EvidenceItem, ResolvedFxDebateRequest, RunOptions
 from src.fx_debate.store import FxEvidenceStore
 from src.tools.validate_fx_output_tool import ValidateFxOutputTool
@@ -648,3 +649,85 @@ def test_risk_review_accepts_misplaced_chain_tool_trace(tmp_path) -> None:
     )
 
     assert result["valid"] is True
+
+
+def test_hypothesis_accepts_deployed_compact_chain_shape() -> None:
+    """Compatibility with the deployed prompt's id/steps/description shape."""
+    output = {
+        "schema_version": "2.0",
+        "agent_role": "pair_bear",
+        "evidence_context_id": "ctx",
+        "hypothesis_direction": "down",
+        "hypothesis_status": "weak",
+        "summary": "弱假设。",
+        "causal_chains": [{
+            "id": "rates-chain",
+            "label": "利差驱动",
+            "direction": "down",
+            "steps": [
+                {"step_type": "observed_fact", "description": "利差扩大", "evidence_ids": ["fxe-1"]},
+                {"step_type": "inference", "description": "美元相对占优", "evidence_ids": ["fxe-1"]},
+                {"step_type": "transmission", "description": "资金流入美元", "evidence_ids": ["fxe-1"]},
+                {"step_type": "window", "description": "未来两周", "evidence_ids": ["fxe-1"]},
+            ],
+        }],
+        "catalysts": [{"description": "利差", "evidence_ids": ["fxe-1"]}],
+        "market_confirmations": [{"description": "价格确认", "evidence_ids": ["fxe-1"]}],
+        "strongest_countercase": {"description": "技术反弹", "evidence_ids": ["fxe-1"]},
+        "invalidation_conditions": [{"id": "i1", "description": "价格反转", "direction": "up", "evidence_ids": ["fxe-1"]}],
+        "coverage": {"market": {"evidence_ids": ["fxe-1"]}},
+        "strength": "low",
+        "missing_data": [{"description": "事件日历缺失"}],
+        "tool_calls": [{"call": "get_fx_evidence_manifest", "params": {}}],
+    }
+    parsed = HypothesisArgumentV2.model_validate(output)
+    assert parsed.causal_chains[0].claim_id == "rates-chain"
+    assert parsed.causal_chains[0].observed_fact == "利差扩大"
+    assert parsed.missing_data == ["事件日历缺失"]
+    assert parsed.tool_calls[0].tool_name == "get_fx_evidence_manifest"
+
+
+def test_hypothesis_downgrades_non_json_optional_shapes_instead_of_crashing() -> None:
+    """The four common top-level shape mistakes must not fail Pydantic parsing."""
+    output = {
+        "schema_version": "2.0",
+        "agent_role": "pair_bull",
+        "evidence_context_id": "ctx",
+        "hypothesis_direction": "up",
+        "hypothesis_status": "supported",
+        "summary": "模型输出部分不可审计。",
+        "causal_chains": ["prose chain without evidence"],
+        "catalysts": [],
+        "market_confirmations": [],
+        "strongest_countercase": [],
+        "invalidation_conditions": [{"id": "i", "description": "反向突破", "unexpected": True}],
+        "coverage": {"domains": [], "evidence_family_ids": [], "limitations": []},
+        "strength": "low",
+        "missing_data": {"description": "4H 数据缺失"},
+        "tool_calls": {"call": "get_fx_evidence_manifest"},
+    }
+    parsed = HypothesisArgumentV2.model_validate(output)
+    assert parsed.hypothesis_status == "weak"
+    assert parsed.causal_chains == []
+    assert parsed.missing_data == ["4H 数据缺失"]
+    assert parsed.tool_calls[0].tool_name == "get_fx_evidence_manifest"
+
+
+def test_relative_state_accepts_scalar_tool_calls() -> None:
+    parsed = RelativeStateV2.model_validate({
+        "schema_version": "2.0",
+        "evidence_context_id": "ctx",
+        "agent_role": "relative_macro_technical",
+        "analysis_status": "insufficient_evidence",
+        "relative_macro_state": "indeterminate",
+        "technical_state": "indeterminate",
+        "cross_confirmation": "indeterminate",
+        "findings": [],
+        "event_state": "unknown",
+        "reliability": "low",
+        "summary": "数据不足。",
+        "missing_data": {"description": "4H 数据缺失"},
+        "tool_calls": {"call": "get_fx_technical_regime"},
+    })
+    assert parsed.tool_calls[0].tool_name == "get_fx_technical_regime"
+    assert parsed.missing_data == ["4H 数据缺失"]

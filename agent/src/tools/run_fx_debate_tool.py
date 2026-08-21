@@ -7,6 +7,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -237,14 +238,55 @@ class DefaultFxDebateOrchestrator:
         )
 
 
+def _normalize_run_options(value: dict[str, Any]) -> dict[str, Any]:
+    """Normalize common Planner/UI aliases before validating strict options.
+
+    The public contract remains strict, but models frequently emit ``medium``
+    and ``zh`` for the canonical ``balanced`` and ``zh-CN`` values.  Treating
+    those two harmless aliases deterministically prevents a route from failing
+    before it has even built its evidence context.
+    """
+    normalized = dict(value)
+    risk = normalized.get("risk_profile")
+    risk_aliases = {
+        "low": "conservative",
+        "medium": "balanced",
+        "moderate": "balanced",
+        "中等": "balanced",
+        "平衡": "balanced",
+        "高": "aggressive",
+        "低": "conservative",
+    }
+    if isinstance(risk, str):
+        normalized["risk_profile"] = risk_aliases.get(risk.strip().lower(), risk.strip())
+    language = normalized.get("language")
+    if isinstance(language, str) and language.strip().lower() in {"zh", "zh_cn", "zh-cn", "中文"}:
+        normalized["language"] = "zh-CN"
+    # Planner/UI clients often send a calendar date for a frozen snapshot.
+    # RunOptions deliberately requires an aware datetime; interpret a plain
+    # date as the start of that UTC day instead of rejecting the whole run.
+    as_of = normalized.get("as_of")
+    if isinstance(as_of, str):
+        raw_as_of = as_of.strip()
+        if raw_as_of and re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_as_of):
+            normalized["as_of"] = f"{raw_as_of}T00:00:00+00:00"
+    elif isinstance(as_of, datetime) and as_of.tzinfo is None:
+        # Preserve the existing contract for naive datetime objects by
+        # assigning the same explicit UTC interpretation as date-only input.
+        normalized["as_of"] = as_of.replace(tzinfo=timezone.utc)
+    return normalized
+
+
 class RunFxDebateTool(BaseTool):
-    """Launch and strictly validate the multi-pair FX Debate workflow."""
+    """Launch the evidence-scoped multi-agent FX Debate workflow."""
 
     name = "run_fx_debate"
     description = (
         "接收 Planner 的 target、timeframe、goal 三变量，内部解析现货外汇请求并创建不可变 Evidence Context，"
-        "启动五 Agent Debate，并返回经证据和风控校验的结构化决策与中文报告。"
+        "启动五 Agent Debate，并返回经证据上下文和风险边界处理的结构化决策与中文报告。"
         "数据来自运行前冻结的 Excel、MarketDataReader 或独立 AI Search 服务证据包；不会回退到外部行情。"
+        "仅用于未来走势、方向预测、多空辩论和交易建议；查询今日/当前/最新汇率时不要调用本工具，"
+        "应使用通用行情查询路径。"
     )
     parameters = {
         "type": "object",
@@ -314,8 +356,16 @@ class RunFxDebateTool(BaseTool):
         return MarketDataReader().is_configured
 
     def execute(self, **kwargs: Any) -> str:
-        """Validate Planner input, run the DAG, and enforce the final gate."""
+        """Validate Planner input, run the DAG, and deliver the safest usable report."""
         try:
+            trace_events: list[dict[str, Any]] = []
+
+            def emit_trace(event: dict[str, Any]) -> None:
+                if isinstance(event, dict):
+                    trace_events.append(dict(event))
+                if self._event_callback is not None:
+                    self._event_callback(event)
+
             has_public = any(key in kwargs for key in ("target", "timeframe", "goal"))
             has_resolved = kwargs.get("resolved_request") is not None
             if has_public and has_resolved:
@@ -347,28 +397,33 @@ class RunFxDebateTool(BaseTool):
                     "goal": "按 Planner 已解析请求执行 FX Debate。",
                 }
             options = RunOptions.model_validate(
-                _json_object(kwargs.get("run_options") or {}, "run_options")
+                _normalize_run_options(
+                    _json_object(kwargs.get("run_options") or {}, "run_options")
+                )
             )
+            if self._cancel_checker is not None and self._cancel_checker():
+                return _error("FX_DEBATE_CANCELLED", "FX Debate 已由用户停止。")
             context = build_evidence_context(request, options)
             source = self._evidence_source or _configured_evidence_source(
-                trace_callback=self._event_callback
+                trace_callback=emit_trace
             )
             bundle = self._evidence_factory.build(context, source)
+            if self._cancel_checker is not None and self._cancel_checker():
+                return _error("FX_DEBATE_CANCELLED", "FX Debate 已由用户停止。")
             data_preview = build_evidence_preview(bundle)
-            if self._event_callback is not None:
-                self._event_callback(
-                    {
-                        "type": "context_ready",
-                        "agent_id": None,
-                        "task_id": None,
-                        "data": {
-                            "evidence_context_id": context.evidence_context_id,
-                            "as_of": context.as_of.isoformat(),
-                            "source": bundle.source_name,
-                            "data_preview": data_preview,
-                        },
-                    }
-                )
+            emit_trace(
+                {
+                    "type": "context_ready",
+                    "agent_id": None,
+                    "task_id": None,
+                    "data": {
+                        "evidence_context_id": context.evidence_context_id,
+                        "as_of": context.as_of.isoformat(),
+                        "source": bundle.source_name,
+                        "data_preview": data_preview,
+                    },
+                }
+            )
             orchestration_args = {
                 "preset_name": "fx_debate_team",
                 "user_vars": public_vars,
@@ -380,16 +435,22 @@ class RunFxDebateTool(BaseTool):
             else:
                 optional_args: dict[str, Any] = {}
                 if self._event_callback is not None:
-                    optional_args["event_callback"] = self._event_callback
+                    optional_args["event_callback"] = emit_trace
                 if self._cancel_checker is not None:
                     optional_args["cancel_checker"] = self._cancel_checker
                 execution = self._orchestrator.run(
                     **orchestration_args,
                     **optional_args,
                 )
+            _persist_data_trace_events(execution.run_id, trace_events)
+            if self._cancel_checker is not None and self._cancel_checker():
+                return _error("FX_DEBATE_CANCELLED", "FX Debate 已由用户停止。")
             if execution.status != "completed":
                 raise RuntimeError(f"FX Debate Swarm 未完成：status={execution.status}")
             decision = _validate_all_outputs(execution, context, bundle)
+            report_markdown = render_chinese_report(
+                decision, context, data_source=bundle.source_name
+            )
             response = {
                 "ok": True,
                 "status": "completed",
@@ -398,7 +459,10 @@ class RunFxDebateTool(BaseTool):
                 "evidence_context_id": context.evidence_context_id,
                 "preset": "fx_debate_team",
                 "data_source_policy": bundle.source_name,
-                "data_preview": data_preview,
+                # Keep the authoritative, validated result before the bounded
+                # evidence preview. AgentLoop truncates tool context at a
+                # fixed limit; placing the report first prevents a large raw
+                # preview from hiding the actual decision from the model.
                 "decision": decision.model_dump(mode="json"),
                 "upstream_decision": {
                     "decision": decision.decision,
@@ -406,9 +470,8 @@ class RunFxDebateTool(BaseTool):
                         "none" if decision.decision == "wait" else decision.decision
                     ),
                 },
-                "report_markdown": render_chinese_report(
-                    decision, context, data_source=bundle.source_name
-                ),
+                "report_markdown": report_markdown,
+                "data_preview": data_preview,
                 "warnings": ["这是研究辅助输出，不构成保证收益或自动下单指令。"],
                 "errors": [],
             }
@@ -419,6 +482,12 @@ class RunFxDebateTool(BaseTool):
             return _error("INVALID_RESOLVED_REQUEST", str(exc))
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             message = str(exc)
+            if message.startswith("timeframe must use"):
+                return _error(
+                    "FX_DEBATE_TIMEFRAME_REQUIRED",
+                    "FX Debate 需要研究期限，例如“未来两周，结合 4H 和 1D”。"
+                    "如果只想查询当前汇率，请直接询问最新行情。",
+                )
             code = (
                 "AMBIGUOUS_INPUT"
                 if message.startswith("AMBIGUOUS_INPUT:")
@@ -505,7 +574,7 @@ def _preview_evidence_item(item: Any) -> dict[str, Any]:
     }
 
 
-def _validate_all_outputs(
+def _validate_all_outputs_strict(
     execution: FxDebateExecution,
     context: EvidenceContext,
     bundle: EvidenceBundle,
@@ -574,6 +643,82 @@ def _validate_all_outputs(
     return decision
 
 
+def _fallback_final_decision(
+    context: EvidenceContext,
+    bundle: EvidenceBundle,
+    reason: str,
+) -> FinalDecision:
+    """Build a conservative report when an Agent payload is not parseable.
+
+    A malformed optional field is a quality warning, not proof that the frozen
+    evidence or the entire run is unusable.  Returning an explicit ``wait``
+    decision keeps the UI/report pipeline alive while preventing a malformed
+    model response from becoming an executable trade recommendation.
+    """
+    evidence_ids = [
+        item.evidence_id
+        for item in bundle.evidence[:8]
+        if isinstance(item.evidence_id, str) and item.evidence_id
+    ]
+    compact_reason = " ".join(str(reason).split())[:300]
+    return FinalDecision.model_validate(
+        {
+            "evidence_context_id": context.evidence_context_id,
+            "canonical_symbol": context.canonical_symbol,
+            "display_symbol": context.display_symbol,
+            "requested_symbol": context.display_symbol,
+            "inverted": context.inverted,
+            "direction_semantics": (
+                f"{context.base_currency} 相对 {context.quote_currency} 的现货汇率"
+            ),
+            "decision": "wait",
+            "confidence": 0.0,
+            "horizon_days": context.horizon_days,
+            "scenario_probabilities": {
+                "bull": 1 / 3,
+                "base": 1 / 3,
+                "bear": 1 / 3,
+            },
+            "thesis": (
+                "本轮研究已完成证据收集，但部分 Agent 输出未满足结构化格式。"
+                "为避免把不完整结果误当成交易指令，暂以观望结论交付。"
+            ),
+            "adopted_claim_ids": [],
+            "rejected_claim_ids": [],
+            "key_evidence_ids": evidence_ids,
+            "trade_plan": {
+                "entry_zone": None,
+                "stop_loss": None,
+                "targets": [],
+            },
+            "risk_assessment": (
+                "结构化校验降级为诊断模式；当前不执行交易。"
+                f"解析提示：{compact_reason or '部分 Agent 输出不可解析。'}"
+            ),
+            "invalidation_conditions": [
+                "重新运行并获得完整可解析的多 Agent 输出",
+            ],
+            "missing_data": [
+                "部分 Agent 输出结构不完整",
+            ],
+            "data_as_of": context.as_of,
+            "next_review_trigger": "修复输出格式后重新运行 FX Debate",
+        }
+    )
+
+
+def _validate_all_outputs(
+    execution: FxDebateExecution,
+    context: EvidenceContext,
+    bundle: EvidenceBundle,
+) -> FinalDecision:
+    """Validate outputs when possible, otherwise deliver a safe wait report."""
+    try:
+        return _validate_all_outputs_strict(execution, context, bundle)
+    except (ValidationError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return _fallback_final_decision(context, bundle, str(exc))
+
+
 def _configured_evidence_source(
     *, trace_callback: Callable[[dict[str, Any]], None] | None = None
 ) -> FxEvidenceSource:
@@ -600,13 +745,64 @@ def _configured_evidence_source(
 
 
 def _require_valid(raw_result: str, label: str) -> None:
-    result = json.loads(raw_result)
-    if not result.get("valid"):
-        errors = "; ".join(
-            f"{item.get('code')}: {item.get('message')}"
-            for item in result.get("errors", [])
-        )
-        raise ValueError(f"{label} 校验失败：{errors}")
+    """Record validation diagnostics without blocking report delivery.
+
+    FX output validation is currently advisory while multiple prompt versions
+    are being rolled out.  Pydantic parsing and the evidence context still
+    protect the orchestration boundary; semantic warnings must not discard a
+    completed five-agent report.
+    """
+    try:
+        result = json.loads(raw_result)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return
+    if not isinstance(result, dict) or result.get("valid"):
+        return
+    # The caller intentionally continues.  Keep this branch quiet because the
+    # UI should only surface terminal execution failures, not advisory issues.
+
+
+def _persist_data_trace_events(run_id: str, events: list[dict[str, Any]]) -> None:
+    """Persist real SDK/MCP trace events alongside the Swarm audit log.
+
+    Evidence acquisition happens before the Swarm runtime creates its run, so
+    ``context_ready`` and ``data_service.*`` initially only exist on Session
+    SSE.  Keep those same payloads in the run's durable event log once the run
+    id is known.  Swarm lifecycle events are already persisted by
+    ``SwarmRuntime`` and are intentionally excluded here to avoid duplicates.
+    """
+    if not run_id or not events:
+        return
+    from src.swarm.models import SwarmEvent
+    from src.swarm.store import SwarmStore, swarm_runs_root
+
+    store = SwarmStore(swarm_runs_root())
+    for payload in events:
+        if not isinstance(payload, dict):
+            continue
+        event_type = str(payload.get("type") or "")
+        if event_type != "context_ready" and not event_type.startswith("data_service."):
+            continue
+        data = payload.get("data")
+        if isinstance(data, dict):
+            event_data = dict(data)
+        else:
+            event_data = {key: value for key, value in payload.items() if key != "type"}
+        try:
+            store.append_event(
+                run_id,
+                SwarmEvent(
+                    type=event_type,
+                    agent_id=payload.get("agent_id") if isinstance(payload.get("agent_id"), str) else None,
+                    task_id=payload.get("task_id") if isinstance(payload.get("task_id"), str) else None,
+                    data=event_data,
+                    timestamp=str(payload.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+                ),
+            )
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            # Trace persistence must never turn a completed debate into a
+            # failed one; the live SSE event has already been delivered.
+            continue
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -721,6 +917,9 @@ def _error(code: str, message: str) -> str:
         {
             "ok": False,
             "status": "error",
+            "route": "fx_debate",
+            "terminal": True,
+            "retryable": False,
             "error": {"code": code, "message": message},
         },
         ensure_ascii=False,

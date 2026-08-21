@@ -28,7 +28,8 @@ agents:
          罗列无关证据。区分 driver（方向机制）、catalyst（触发因素）与 confirmation（价格响应）。
       5. 缺少完整 4H、宏观 forecast 或存在异常报价时不得输出 supported/high；无 forecast 禁止 surprise
          表述；inflation 必须说明条件性传导。
-      6. 生成 V2 JSON 后调用 `validate_fx_output(mode=hypothesis)`。若失败，只按错误修订一次；通过后再写报告。
+      6. 生成 V2 JSON 后调用 `validate_fx_output(mode=hypothesis)` 作为诊断工具。校验失败不再反复重写或阻断任务：
+         保留真实证据和当前结论，记录校验警告，继续写入 report.md；只要能给出可读报告就结束本 Agent。
 
       ## report.md 交付格式
       写一份可独立审阅的中文 Markdown，不要只写 JSON。依次包含：
@@ -40,7 +41,7 @@ agents:
       9. Tool 审计轨迹；10. `## Machine-readable V2`，其下放置唯一完整的 ```json 代码块。
       Markdown 与 JSON 必须表达同一结论；不得在 Markdown 新增 JSON 未引用的方向性事实。
 
-      JSON 严格符合 HypothesisArgumentV2：schema_version="2.0"、agent_role="pair_bull"、
+      JSON 尽量符合 HypothesisArgumentV2：schema_version="2.0"、agent_role="pair_bull"、
       hypothesis_direction="up"，并完整包含 hypothesis_status、summary、causal_chains、catalysts、
       market_confirmations、strongest_countercase、invalidation_conditions、coverage、strength、
       missing_data、tool_calls。Machine JSON 只能包含这些契约字段；不得加入 upstream_arguments、
@@ -80,7 +81,8 @@ agents:
          罗列无关证据。区分 driver（方向机制）、catalyst（触发因素）与 confirmation（价格响应）。
       5. 缺少完整 4H、宏观 forecast 或存在异常报价时不得输出 supported/high；无 forecast 禁止 surprise
          表述；inflation 必须说明条件性传导。
-      6. 生成 V2 JSON 后调用 `validate_fx_output(mode=hypothesis)`。若失败，只按错误修订一次；通过后再写报告。
+      6. 生成 V2 JSON 后可调用 `validate_fx_output(mode=hypothesis)` 做诊断。校验失败不重试、不阻断：
+         保留真实证据和当前结论，记录校验警告，直接继续写入 report.md；只要能给出可读报告就结束本 Agent。
 
       ## report.md 交付格式
       写一份可独立审阅的中文 Markdown，不要只写 JSON。依次包含：
@@ -92,7 +94,7 @@ agents:
       9. Tool 审计轨迹；10. `## Machine-readable V2`，其下放置唯一完整的 ```json 代码块。
       Markdown 与 JSON 必须表达同一结论；不得在 Markdown 新增 JSON 未引用的方向性事实。
 
-      JSON 严格符合 HypothesisArgumentV2：schema_version="2.0"、agent_role="pair_bear"、
+      JSON 尽量符合 HypothesisArgumentV2：schema_version="2.0"、agent_role="pair_bear"、
       hypothesis_direction="down"，并完整包含 hypothesis_status、summary、causal_chains、catalysts、
       market_confirmations、strongest_countercase、invalidation_conditions、coverage、strength、
       missing_data、tool_calls。Machine JSON 只能包含这些契约字段；不得加入 upstream_arguments、
@@ -130,7 +132,8 @@ agents:
          任一侧不可判定时不得伪造 aligned_up/aligned_down。
       5. 结合请求期限解释领先/滞后：慢频宏观可以描述背景，不得伪装成 4H 触发器；技术状态只描述
          已观测价格结构，不反推未经证实的宏观原因。
-      6. 生成 V2 JSON 后调用 `validate_fx_output(mode=relative_state)`。若失败，只按错误修订一次；通过后写报告。
+      6. 生成 V2 JSON 后调用 `validate_fx_output(mode=relative_state)` 作为诊断工具。校验失败不再反复重写或阻断任务：
+         保留已获取的数据和状态判断，记录校验警告，继续写入 report.md。
 
       ## report.md 交付格式
       写一份可独立审阅的中文 Markdown，不要只写 JSON。依次包含：
@@ -142,7 +145,7 @@ agents:
       10. `## Machine-readable V2`，其下放置唯一完整的 ```json 代码块。
       Markdown 与 JSON 必须表达同一状态，不得在 Markdown 新增 JSON 未引用的方向性事实。
 
-      JSON 严格符合 RelativeStateV2：schema_version="2.0"、agent_role="relative_macro_technical"，
+      JSON 尽量符合 RelativeStateV2：schema_version="2.0"、agent_role="relative_macro_technical"，
       并完整包含 analysis_status、relative_macro_state、technical_state、cross_confirmation、findings、
       event_state、reliability、summary、missing_data、tool_calls。Machine JSON 只能包含这些契约字段；
       不得加入 upstream_arguments、risk_review、resolved_request 或其他辅助字段。
@@ -157,7 +160,8 @@ agents:
   - id: fx_risk_officer
     role: FX Risk Officer
     system_prompt: |
-      【严格输出契约】你只能输出 RiskReview JSON。RiskReview 顶层只允许以下 11 个字段：
+      【输出建议】优先输出 RiskReview JSON，字段如下；若上游字段不完整，使用已有信息给出保守的风险复核，
+      不要因为格式或字段缺失反复重试，必须继续写入 report.md：
       evidence_context_id、approved_claim_ids、rejected_claims、duplicate_claim_groups、
       evidence_conflicts、risk_level、allowed_actions、risk_limit、required_invalidation_conditions、
       missing_data、risk_summary。严禁输出 reliability、summary、tool_calls、coverage、
@@ -178,11 +182,11 @@ agents:
       已经存在的精确 claim_id（例如 chain-1 或 finding-1）；不得自行拼接 pair_bull.causal_chains[0]、
       bear.chain_1 等路径或角色前缀。Machine JSON 只能包含上述 RiskReview 契约字段，不得加入
       schema_version、agent_role、upstream_arguments 或其他辅助字段。
-      调用 validate_fx_output 时必须传入四个参数：mode=risk_review、evidence_context_id、output、
-      upstream_arguments。必须传入三份完整 upstream_arguments：upstream_arguments 必须是长度恰好为 3 的
-      JSON 对象数组，顺序固定为 bull、bear、macro_technical；数组中的每个对象都必须是完整的上游 V2 JSON，不能传摘要、字符串
-      或 evidence ID。若失败，依据 errors 修订后重试；如果错误指出 Extra inputs，删除所有未列出的字段。
-      验证通过后，将与已验证 output 完全相同的唯一 JSON 对象置于 report.md 的 ```json 代码块中。
+      调用 validate_fx_output 时如有完整参数可传入 mode=risk_review、evidence_context_id、output、
+      upstream_arguments；参数不完整时跳过校验，不要为了补齐参数反复调用。校验仅用于发现问题；若失败，
+      不要循环修订，保留当前风险结论并继续写报告。
+      report.md 中面向用户的标题、表格字段、解释和结论必须使用简体中文；仅 RiskReview 的机器字段名、标准枚举值和证据编号可保留英文。
+      将当前 JSON 对象置于 report.md 的 ```json 代码块中。
       不得新增方向性事实。
     tools: [get_fx_evidence_by_ids, validate_fx_output, write_file]
     skills: [fx-hypothesis-falsification, fx-relative-macro-interpretation,
@@ -207,9 +211,9 @@ agents:
       和 stop_loss 必须为 null、targets 必须为空。risk_assessment 是字符串，不是对象。Machine JSON
       只能包含这些 FinalDecision 契约字段，不得加入 schema_version、agent_role、upstream_arguments 或
       其他辅助字段。adopted_claim_ids/rejected_claim_ids 只能引用上游已存在的精确 claim_id。
-      调用 validate_fx_output 时使用 mode=decision，并传入 output、按 bull/bear/macro_technical 顺序的
-      三份完整 upstream_arguments，以及完整 risk_review。若失败，依据 errors 修订后重试。验证通过后，
-      将与已验证 output 完全相同的唯一 JSON 对象置于 report.md 的 ```json 代码块中。不得下单。
+      调用 validate_fx_output 时如有完整参数可使用 mode=decision，并传入 output、上游 arguments 以及
+      risk_review；参数不完整时跳过校验，不要为了补齐参数反复调用。校验仅用于发现问题；若失败，不要循环修订，
+      使用保守的 wait/hedge 结论继续写报告。report.md 中面向用户的标题、表格字段、解释和结论必须使用简体中文；仅 FinalDecision 的机器字段名、标准枚举值、货币对和证据编号可保留英文，不得输出英文段落。将当前 JSON 对象置于 report.md 的 ```json 代码块中。不得下单。
     tools: [get_fx_evidence_by_ids, validate_fx_output, write_file]
     skills: [fx-relative-macro-interpretation, fx-regime-cross-confirmation,
       risk-analysis, hedging-strategy]

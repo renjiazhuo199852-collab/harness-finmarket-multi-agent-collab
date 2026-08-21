@@ -18,8 +18,34 @@ from typing import Any, Callable
 
 import pytest
 
-from src.agent.loop import AgentLoop
+from src.agent.loop import AgentLoop, _tool_context_payload
+from src.agent.tools import BaseTool, ToolRegistry
 from src.providers.chat import ProviderStreamError
+
+
+def test_fx_debate_tool_context_keeps_validated_result_before_raw_preview() -> None:
+    """Large evidence previews must not hide the authoritative FX report."""
+    payload = {
+        "ok": True,
+        "status": "completed",
+        "run_id": "swarm-test",
+        "evidence_context_id": "fxctx-test",
+        "decision": {"decision": "wait", "key_evidence_ids": ["fxe-1"]},
+        "report_markdown": "# 已校验的辩论报告\n\n只能观望。",
+        "data_preview": {
+            "counts": {"macro": 16},
+            "raw_counts": {"macro": 16},
+            "manifest": {"overall_status": "partial"},
+            "derived": {},
+            "domains": {"macro": {"source_rows": ["x" * 50000]}},
+        },
+    }
+
+    result = _tool_context_payload("run_fx_debate", json.dumps(payload, ensure_ascii=False))
+    assert len(result) < 10_000
+    assert "已校验的辩论报告" in result
+    assert '"decision": {"decision": "wait"' in result
+    assert "source_rows" not in result
 
 
 class _StubLLMResponse:
@@ -119,6 +145,54 @@ class _StubLLMCancelMidStream:
         # iteration completes cleanly.
         self._agent_ref[0]._cancel_event.set()
         return _StubLLMResponse()
+
+    def chat(self, messages: list[dict[str, Any]], **_: Any) -> _StubLLMResponse:
+        return _StubLLMResponse()
+
+
+class _TerminalFxTool(BaseTool):
+    name = "run_fx_debate"
+    description = "test FX tool"
+    parameters = {"type": "object", "properties": {}}
+    repeatable = True
+    is_readonly = False
+
+    def execute(self, **_: Any) -> str:
+        return json.dumps(
+            {
+                "ok": False,
+                "status": "error",
+                "route": "fx_debate",
+                "terminal": True,
+                "retryable": False,
+                "error": {"code": "FX_DEBATE_FAILED", "message": "provider unavailable"},
+            }
+        )
+
+
+class _StubLLMWouldFallbackAfterToolError:
+    """A planner that would issue a second answer if the tool error is non-terminal."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def stream_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Any] | None = None,
+        on_text_chunk: Callable[[str], None] | None = None,
+        on_reasoning_chunk: Callable[[str], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> _StubLLMResponse:
+        del messages, tools, on_text_chunk, on_reasoning_chunk, should_cancel
+        self.calls += 1
+        response = _StubLLMResponse()
+        if self.calls == 1:
+            response.has_tool_calls = True
+            response.tool_calls = [SimpleNamespace(id="fx-1", name="run_fx_debate", arguments={})]
+        else:
+            response.content = "fallback route"
+        return response
 
     def chat(self, messages: list[dict[str, Any]], **_: Any) -> _StubLLMResponse:
         return _StubLLMResponse()
@@ -245,6 +319,33 @@ def test_cancel_mid_stream_skips_tool_execution(tmp_path: Path) -> None:
     assert result["status"] == "cancelled"
     assert result["reason"] == "cancelled by user"
     assert processed["tools"] is False
+
+
+def test_terminal_fx_tool_error_does_not_start_a_second_planning_round(tmp_path: Path) -> None:
+    """A failed FX route must end the user turn instead of falling back silently."""
+    from src.memory.persistent import PersistentMemory
+
+    llm = _StubLLMWouldFallbackAfterToolError()
+    registry = ToolRegistry()
+    registry.register(_TerminalFxTool())
+    pm = PersistentMemory()
+    agent = AgentLoop(
+        registry=registry,
+        llm=llm,
+        event_callback=None,
+        max_iterations=3,
+        persistent_memory=pm,
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    agent.memory.run_dir = str(run_dir)
+
+    result = agent.run(user_message="分析 EURUSD 未来两周走势")
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "FX_DEBATE_FAILED: provider unavailable"
+    assert result["iterations"] == 1
+    assert llm.calls == 1
 
 
 def test_session_service_renders_meaningful_error_from_result(tmp_path: Path) -> None:

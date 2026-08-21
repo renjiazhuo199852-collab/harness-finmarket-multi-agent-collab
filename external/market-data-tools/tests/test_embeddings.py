@@ -11,6 +11,7 @@ TOOLS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_ROOT))
 
 from backend.ai_search import generate_embeddings  # noqa: E402
+from backend.ai_search import config  # noqa: E402
 
 
 class _FakeResponse:
@@ -54,3 +55,18 @@ def test_request_embeddings_sends_requested_dimension(monkeypatch) -> None:
     }
     assert len(vectors) == 1
     assert len(vectors[0]) == 2048
+
+
+def test_embedding_base_url_adds_api_path_only_at_request_time(monkeypatch) -> None:
+    monkeypatch.setenv("EMBEDDING_API_KEY", "ark-test-key")
+    monkeypatch.setenv(
+        "EMBEDDING_BASE_URL",
+        "https://ark.cn-beijing.volces.com/api/coding/v3",
+    )
+    monkeypatch.delenv("EMBEDDING_ENDPOINT", raising=False)
+
+    settings = config.embedding_settings()
+
+    assert settings["endpoint"] == (
+        "https://ark.cn-beijing.volces.com/api/coding/v3/embeddings"
+    )

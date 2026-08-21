@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -136,6 +137,57 @@ def test_swarm_detail_uses_redacted_public_task_projection(
     assert "prompt_template" not in task
     assert task["worker_iterations"] == 3
     assert task["iterations"] == 3
+
+
+def test_swarm_detail_includes_persisted_events_for_history_replay(
+    swarm_store: SwarmStore,
+) -> None:
+    run = _create_run(swarm_store, status=RunStatus.completed)
+    swarm_store.append_event(
+        run.id,
+        SwarmEvent(
+            type="tool_call",
+            data={"tool": "get_fx_evidence_manifest"},
+            timestamp="2026-07-16T00:00:01+00:00",
+        ),
+    )
+
+    response = _client().get(f"/swarm/runs/{run.id}")
+
+    assert response.status_code == 200
+    assert response.json()["events"][0]["type"] == "tool_call"
+
+
+def test_swarm_detail_projects_persisted_evidence_bundle_for_history_data_view(
+    swarm_store: SwarmStore,
+) -> None:
+    run = _create_run(swarm_store, status=RunStatus.completed)
+    run.trusted_context = {
+        "evidence_bundle_json": json.dumps(
+            {
+                "evidence_context_id": "ctx-history",
+                "as_of": "2026-07-16T00:00:00+00:00",
+                "source_name": "database",
+                "evidence": [
+                    {
+                        "evidence_id": "quote-1",
+                        "domain": "market",
+                        "name": "EURUSD spot",
+                        "source": "database",
+                    }
+                ],
+            }
+        ),
+        "resolved_request_json": "internal request details",
+    }
+    swarm_store.update_run(run)
+
+    response = _client().get(f"/swarm/runs/{run.id}")
+
+    assert response.status_code == 200
+    assert response.json()["evidence_bundle"]["evidence_context_id"] == "ctx-history"
+    assert response.json()["evidence_bundle"]["evidence"][0]["evidence_id"] == "quote-1"
+    assert "resolved_request_json" not in response.text
 
 
 def test_swarm_presets_require_auth_when_api_key_configured(

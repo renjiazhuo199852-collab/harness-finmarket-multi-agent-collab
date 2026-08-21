@@ -787,7 +787,9 @@ def register_sessions_routes(app: FastAPI) -> None:
             )
             return result
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc))
+            detail = str(exc)
+            status_code = 409 if detail.startswith("SESSION_BUSY:") else 404
+            raise HTTPException(status_code=status_code, detail=detail)
 
     @app.post("/sessions/{session_id}/cancel", dependencies=[Depends(require_auth)])
     async def cancel_session(session_id: str):
