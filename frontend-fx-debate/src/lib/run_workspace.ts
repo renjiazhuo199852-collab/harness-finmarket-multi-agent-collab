@@ -136,7 +136,9 @@ export function applyRunEvent(state: RunWorkspaceState, event: SessionEvent): Ru
   const snapshot = started
     ? {
       ...started,
-      events: [...state.pendingSnapshot.events, ...started.events].slice(-500),
+      // 从待定会话切换到正式运行时，保留切换前已经收到的全部事件，
+      // 避免 MCP 实时阶段在运行快照建立时被截断。
+      events: [...state.pendingSnapshot.events, ...started.events],
       evidence: state.pendingSnapshot.evidence.items.length
         ? state.pendingSnapshot.evidence
         : started.evidence,

@@ -501,7 +501,9 @@ export function applySessionEvent(snapshot: WorkspaceSnapshot, sessionEvent: Ses
     const started = fromStarted(snapshot.sessionId, sessionEvent.data);
     return {
       ...started,
-      events: [...snapshot.events, ...started.events].slice(-500),
+      // 历史流程日志需要完整保留，不能因为开始事件到达时重新组装快照
+      // 就丢弃已经实时收到的 MCP、工具和数据库事件。
+      events: [...snapshot.events, ...started.events],
       evidence: snapshot.evidence.items.length ? snapshot.evidence : started.evidence,
     };
   }
@@ -533,7 +535,9 @@ export function applySessionEvent(snapshot: WorkspaceSnapshot, sessionEvent: Ses
     ...snapshot,
     status,
     variables,
-    events: [...snapshot.events, event].slice(-500),
+    // 事件是流程日志的事实记录。这里不再设置数量上限，保证实时事件和
+    // 后端历史回放事件在页面上使用同一份完整记录。
+    events: [...snapshot.events, event],
     agents: updateAgent(snapshot.agents, event),
     tasks: updateTasks(snapshot.tasks, event),
   };
@@ -601,7 +605,9 @@ export function hydrateRun(sessionId: string | undefined, run: Record<string, un
   return {
     ...replayed,
     status: (String(run.status || "pending") as WorkspaceSnapshot["status"]),
-    events: [...replayed.events, ...taskEvents].slice(-500),
+    // 后端返回的 events.jsonl 是完整审计日志。历史页面应保留全部事件，
+    // 这样 MCP 阶段不会因为后续 Agent 文本事件较多而从日志中消失。
+    events: [...replayed.events, ...taskEvents],
     evidence,
     report: report ? { ...report, markdown: typeof run.final_report === "string" ? run.final_report : report.markdown } : fallbackReport,
     agentReports,

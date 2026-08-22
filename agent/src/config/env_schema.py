@@ -270,8 +270,11 @@ class FxDebateDataConfig(_EnvBase):
     mcp_working_directory: str = Field(
         alias="FX_DATA_MCP_WORKING_DIRECTORY", default=""
     )
+    # 一次 unified_search 可能连续经过查询理解、Embedding、候选模型判断和
+    # 业务表查询。默认等待时间设置为 120 秒，避免主 Agent 在 AI Search
+    # 仍在正常处理时过早终止 MCP 请求；部署环境仍可通过环境变量覆盖。
     mcp_timeout_seconds: float = Field(
-        alias="FX_DATA_MCP_TIMEOUT_SECONDS", default=30.0, ge=1.0, le=300.0
+        alias="FX_DATA_MCP_TIMEOUT_SECONDS", default=120.0, ge=1.0, le=300.0
     )
 
 

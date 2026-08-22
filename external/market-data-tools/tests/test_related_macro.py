@@ -116,6 +116,18 @@ def test_query_understanding_relation_scope_is_controlled() -> None:
         raise AssertionError("非法 relation_scope 未被拒绝")
 
 
+def test_query_understanding_infers_related_scope_when_model_omits_it() -> None:
+    """模型漏返回关系字段时，明确的用户语义仍必须进入关系查询。"""
+
+    model_result = dict(_understanding())
+    model_result.pop("relation_scope")
+    result = validate_query_understanding_result(
+        model_result,
+        original_query="查询与 EURUSD 相关的宏观指标",
+    )
+    assert result["relation_scope"] == "related_to_subject"
+
+
 def test_related_macro_adapter_keeps_metric_identity() -> None:
     """相关宏观结果必须把 metric_id 和关系角色放入公开 data。"""
 

@@ -39,6 +39,40 @@ REQUEST_TIMEOUT = 90
 QUERY_RELATION_SCOPES = frozenset({"direct", "related_to_subject"})
 
 
+def _infer_relation_scope_from_query(query: str | None) -> str:
+    """根据用户原文兜底识别“相关宏观指标”查询。
+
+    ``direct`` 会把主体当作单个宏观指标，``related_to_subject`` 则会先确认
+    金融工具，再读取正式的 ``source.instrument_metric_link`` 关系表。聊天模型
+    偶尔会漏返回 ``relation_scope``，不能在字段缺失时无条件默认为 ``direct``，
+    否则 ``EURUSD`` 会被错误当成宏观观测的 instrument_id。这里只依据用户原文
+    的关系词和宏观业务词做有限、可解释的兜底，不生成任何数据集、指标 ID 或
+    数据库对象。
+    """
+
+    if not query:
+        return "direct"
+    normalized_query = query.casefold()
+    relation_terms = ("相关", "有关", "关联", "related", "relevant")
+    macro_terms = (
+        "宏观",
+        "经济指标",
+        "宏观指标",
+        "政策利率",
+        "利率",
+        "债券收益率",
+        "economic indicator",
+        "macroeconomic",
+        "interest rate",
+        "bond yield",
+    )
+    if any(term.casefold() in normalized_query for term in relation_terms) and any(
+        term.casefold() in normalized_query for term in macro_terms
+    ):
+        return "related_to_subject"
+    return "direct"
+
+
 def _chat_endpoint() -> str:
     """根据环境变量构造 OpenAI 兼容的聊天接口地址。"""
 
@@ -305,7 +339,14 @@ def validate_query_understanding_result(
     request_text = _optional_text(model_result.get("request_text"), "request_text")
     query_rewrite = _optional_text(model_result.get("query_rewrite"), "query_rewrite")
     search_terms = _validate_search_terms(model_result.get("search_terms"))
-    relation_scope = model_result.get("relation_scope", "direct")
+    # 模型漏字段时，优先使用用户原文中的明确关系语义。即使模型显式返回
+    # direct，只要原文明确询问“与某主体相关的宏观指标”，也必须走关系表，
+    # 避免把金融工具主体误传给单指标宏观查询。
+    inferred_relation_scope = _infer_relation_scope_from_query(original_query)
+    raw_relation_scope = model_result.get("relation_scope")
+    relation_scope = raw_relation_scope or inferred_relation_scope
+    if inferred_relation_scope == "related_to_subject" and relation_scope == "direct":
+        relation_scope = inferred_relation_scope
     if relation_scope not in QUERY_RELATION_SCOPES:
         raise ValueError(
             "query_understanding.relation_scope 只能是 direct 或 related_to_subject"
