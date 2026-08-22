@@ -223,6 +223,35 @@ describe("dynamic research progress model", () => {
     expect(execution.map((stage) => stage.status)).toEqual(["completed", "in_progress", "pending"]);
   });
 
+  it("does not let stale completed agent cards outrun live task dependencies", () => {
+    const snapshot: WorkspaceSnapshot = {
+      sessionId: "session-stale-agent-status",
+      runId: "stale-agent-status-run",
+      status: "running",
+      preset: "fx_debate_team",
+      variables: {},
+      agents: [
+        // These are deliberately stale per-agent events. The task DAG is the
+        // fresher source of truth while risk is still executing.
+        { id: "research", role: "Research", taskId: "research-task", status: "completed" },
+        { id: "risk", role: "Risk", taskId: "risk-task", status: "completed" },
+        { id: "judge", role: "Judge", taskId: "judge-task", status: "completed" },
+      ],
+      tasks: [
+        { id: "research-task", agent_id: "research", status: "completed", depends_on: [] },
+        { id: "risk-task", agent_id: "risk", status: "in_progress", depends_on: ["research-task"] },
+        { id: "judge-task", agent_id: "judge", status: "pending", depends_on: ["risk-task"] },
+      ],
+      events: [],
+      evidence: { items: [] },
+    };
+
+    const execution = buildResearchProgress(snapshot).stages.filter((stage) => stage.kind === "execution");
+    expect(execution.map((stage) => stage.status)).toEqual(["completed", "in_progress", "pending"]);
+    expect(dependencyAwareAgentStatus(snapshot, snapshot.agents[1])).toBe("in_progress");
+    expect(dependencyAwareAgentStatus(snapshot, snapshot.agents[2])).toBe("pending");
+  });
+
   it("reconciles stale task snapshots when the server has completed the run", () => {
     const snapshot: WorkspaceSnapshot = {
       sessionId: "session-terminal-snapshot",

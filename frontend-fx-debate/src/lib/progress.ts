@@ -65,7 +65,22 @@ function agentForTask(task: SwarmTask, agents: AgentSnapshot[]): AgentSnapshot |
 }
 
 function liveTaskStatus(task: SwarmTask, agents: AgentSnapshot[]): string {
-  return agentForTask(task, agents)?.status || task.status || "pending";
+  const taskStatus = task.status || "pending";
+  const agentStatus = agentForTask(task, agents)?.status;
+  if (!agentStatus) return taskStatus;
+
+  // Task and agent events are delivered independently. During a transition,
+  // an older agent.completed event can coexist with a newer task.pending or
+  // task.in_progress status (the exact state that made a downstream card look
+  // complete while its dependency layer was still running). Keep the more
+  // conservative non-terminal state until both views agree.
+  const waiting = new Set(["pending", "blocked"]);
+  if (ACTIVE.has(taskStatus) || waiting.has(taskStatus)) return taskStatus;
+  if (ACTIVE.has(agentStatus) || waiting.has(agentStatus)) return agentStatus;
+  if (FAILED.has(taskStatus) || FAILED.has(agentStatus)) {
+    return FAILED.has(taskStatus) ? taskStatus : agentStatus;
+  }
+  return taskStatus === "completed" || agentStatus === "completed" ? "completed" : taskStatus;
 }
 
 function dependencyAwareTaskStatus(
