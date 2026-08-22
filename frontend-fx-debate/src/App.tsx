@@ -10,7 +10,7 @@ import { MarkdownContent } from "@/components/MarkdownContent";
 import { SettingsView } from "@/components/SettingsView";
 import { buildReportDownloadMarkdown, displayReportMarkdown, downloadTextFile, localizeReportMarkdown } from "@/lib/report";
 import { SessionTransport, type SSEStatus } from "@/lib/sse";
-import { buildResearchProgress, type ProgressStageStatus, type ResearchProgressStage } from "@/lib/progress";
+import { buildResearchProgress, dependencyAwareAgentStatus, type ProgressStageStatus, type ResearchProgressStage } from "@/lib/progress";
 import { activeSnapshot, applyRunEvent, emptyRunWorkspace, hydrateReportsFromMessages, hydrateRunSnapshot, markActiveRunCancelled, needsRunHydration, replaceRunSummaries, runIdFromEvent, selectRun as selectRunState } from "@/lib/run_workspace";
 import { isRunActive, settleCancellation } from "@/lib/run_controls";
 import { AGENT_TEAM_CATEGORIES, agentResponsibility, agentRoleLabel, isCatalogVisible, isCorePreset, presetDisplay, taskLabel, variableLabels, type AgentTeamCategory } from "@/lib/swarmZhCN";
@@ -156,6 +156,10 @@ function visibleAgentStatus(status: string, runStatus: WorkspaceSnapshot["status
   return runStatus === "running" && status === "failed" ? "retrying" : status;
 }
 
+function workspaceAgentStatus(workspace: WorkspaceSnapshot, agent: AgentSnapshot): string {
+  return visibleAgentStatus(dependencyAwareAgentStatus(workspace, agent), workspace.status);
+}
+
 function visibleEventStatus(event: WorkspaceEvent, runStatus: WorkspaceSnapshot["status"]): string {
   const terminalFailure = ["task_failed", "run_failed", "run_error", "task.failed", "run.failed", "run.error"].includes(event.type);
   return runStatus === "running" && terminalFailure ? "retrying" : event.status || "running";
@@ -290,7 +294,7 @@ function ChatView({
       <div className="summary-heading"><span>当前运行</span><StatusPill status={workspace.status} /></div>
       {hasSwarm ? <>
         <div className="run-id">{workspace.preset || "FX Debate"}<code>{workspace.runId}</code></div>
-        <div className="summary-agents">{workspace.agents.map((agent) => { const displayStatus = visibleAgentStatus(agent.status, workspace.status); return <div className="summary-agent" key={agent.id}><span className={`agent-dot dot-${displayStatus}`} /><span>{agent.role}</span><small>{statusText(displayStatus)}</small></div>; })}</div>
+        <div className="summary-agents">{workspace.agents.map((agent) => { const displayStatus = workspaceAgentStatus(workspace, agent); return <div className="summary-agent" key={agent.id}><span className={`agent-dot dot-${displayStatus}`} /><span>{agent.role}</span><small>{statusText(displayStatus)}</small></div>; })}</div>
         <div className="summary-actions"><button className="text-button" onClick={() => onView("canvas")}>协作画布 <ChevronRight size={14} /></button><button className="text-button" onClick={() => onView("report")}>最终报告 <ChevronRight size={14} /></button></div>
       </> : workspace.status !== "idle" ? <div className="summary-current"><strong>{progress.currentLabel}</strong><p>{workspace.lastError ? friendlyError(workspace.lastError) : "正在等待服务端确定处理路径；收到运行计划后会自动显示实际任务和依赖关系。"}</p><button className="text-button" onClick={() => onView("logs")}>查看流程日志 <ChevronRight size={14} /></button></div> : <p className="muted">发送问题后，运行 ID、实际处理路径和证据摘要会显示在这里。</p>}
     </div>
@@ -361,7 +365,7 @@ function ProgressIcon({ status }: { status: ProgressStageStatus }): ReactElement
 function ResearchProgressPanel({ workspace, onView, onSelectAgent }: { workspace: WorkspaceSnapshot; onView: (view: WorkspaceView) => void; onSelectAgent: (agent: AgentSnapshot) => void }): ReactElement | null {
   if (workspace.status === "idle" && workspace.events.length === 0) return null;
   const progress = buildResearchProgress(workspace);
-  const visibleAgents = workspace.agents.filter((agent) => agent.output || agent.error || ["running", "retrying", "in_progress", "failed", "blocked"].includes(visibleAgentStatus(agent.status, workspace.status)));
+  const visibleAgents = workspace.agents.filter((agent) => agent.output || agent.error || ["running", "retrying", "in_progress", "failed", "blocked"].includes(workspaceAgentStatus(workspace, agent)));
   return <section className="research-progress" aria-label="研究执行进度">
     <div className="progress-head"><div><span>研究链路与实时进度</span><strong>{progress.currentLabel}</strong></div><StatusPill status={workspace.status} /></div>
     <div className="progress-stages">{progress.stages.map((stage, index) => <div className={`progress-stage progress-${stage.status}`} key={stage.id}>
@@ -370,7 +374,7 @@ function ResearchProgressPanel({ workspace, onView, onSelectAgent }: { workspace
     </div>)}</div>
     {visibleAgents.length > 0 && <div className="agent-stream-list">{visibleAgents.map((agent) => {
       const meta = agentUi(agent);
-      const displayStatus = visibleAgentStatus(agent.status, workspace.status);
+      const displayStatus = workspaceAgentStatus(workspace, agent);
       const transientFailure = workspace.status === "running" && agent.status === "failed";
       const summary = transientFailure
         ? "服务端正在确认最终状态"
@@ -384,16 +388,18 @@ function ResearchProgressPanel({ workspace, onView, onSelectAgent }: { workspace
   </section>;
 }
 
-function AgentCard({ agent, selected, onSelect, pendingText, workspaceStatus }: { agent: AgentSnapshot; selected: boolean; onSelect: () => void; pendingText?: string; workspaceStatus: WorkspaceSnapshot["status"] }): ReactElement {
+function AgentCard({ agent, selected, onSelect, pendingText, workspace }: { agent: AgentSnapshot; selected: boolean; onSelect: () => void; pendingText?: string; workspace: WorkspaceSnapshot }): ReactElement {
   const meta = agentUi(agent);
   const Icon = meta.icon;
-  const displayStatus = visibleAgentStatus(agent.status, workspaceStatus);
-  const transientFailure = workspaceStatus === "running" && agent.status === "failed";
-  const activity = agent.error
+  const displayStatus = workspaceAgentStatus(workspace, agent);
+  const transientFailure = workspace.status === "running" && agent.status === "failed";
+  const activity = ["pending", "blocked"].includes(displayStatus)
+    ? pendingText || "等待上一阶段完成"
+    : agent.error
     ? transientFailure ? "服务端正在确认最终状态" : friendlyError(agent.error)
     : agent.tool ? `正在调用：${agent.tool}`
       : agent.output ? displayStatus === "completed" ? completedOutputPreview(agent.output, 150) : compactText(agent.output, 150)
-        : (["pending", "blocked"].includes(displayStatus) ? pendingText || "等待上一阶段完成" : meta.description);
+        : meta.description;
   return <button className={`agent-card ${selected ? "agent-selected" : ""}`} onClick={onSelect}>
     <div className="agent-card-top"><span className="agent-icon"><Icon size={16} /></span><div className="agent-card-title"><strong>{meta.title}</strong><span>{meta.subtitle}</span></div><StatusPill status={displayStatus} /></div>
     <p className="agent-card-description">{meta.description}</p>
@@ -442,7 +448,7 @@ function CanvasView({ workspace, onSelect, selectedAgentId }: { workspace: Works
           <p className="dag-stage-detail">{stage.detail}</p>
           <div className="canvas-column">{stage.agentIds.map((agentId) => {
             const agent = byId.get(agentId);
-            return agent ? <AgentCard key={agent.id} agent={agent} pendingText={pendingMessage(agent)} workspaceStatus={workspace.status} onSelect={() => onSelect(agent)} selected={selectedAgentId === agent.id} /> : null;
+            return agent ? <AgentCard key={agent.id} agent={agent} pendingText={pendingMessage(agent)} workspace={workspace} onSelect={() => onSelect(agent)} selected={selectedAgentId === agent.id} /> : null;
           })}</div>
         </section>
       </div>)}</div>}

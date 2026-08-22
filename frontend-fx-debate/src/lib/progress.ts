@@ -98,6 +98,18 @@ function dependencyAwareTaskStatus(
   return dependencyPending ? "pending" : rawStatus;
 }
 
+/** Resolve the status shown for an Agent card from the server DAG rather than
+ * only the latest per-agent event, which may arrive out of order. */
+export function dependencyAwareAgentStatus(workspace: WorkspaceSnapshot, agent: AgentSnapshot): string {
+  const task = workspace.tasks.find((candidate) => (
+    candidate.id === agent.taskId
+      || canonicalAgentId(candidate.agent_id) === canonicalAgentId(agent.id)
+  ));
+  return task
+    ? dependencyAwareTaskStatus(task, new Map(workspace.tasks.map((item) => [item.id, item])), workspace.agents, workspace.status)
+    : agent.status;
+}
+
 function taskLayers(tasks: SwarmTask[]): SwarmTask[][] {
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const memo = new Map<string, number>();
@@ -123,7 +135,7 @@ function taskLayers(tasks: SwarmTask[]): SwarmTask[][] {
 
 function taskStages(workspace: WorkspaceSnapshot): ResearchProgressStage[] {
   const tasksById = new Map(workspace.tasks.map((task) => [task.id, task]));
-  return taskLayers(workspace.tasks).map((tasks, index) => {
+  const stages: ResearchProgressStage[] = taskLayers(workspace.tasks).map((tasks, index) => {
     const agents = tasks.map((task) => agentForTask(task, workspace.agents));
     const roles = tasks.map((task, taskIndex) => {
       const agentId = canonicalAgentId(task.agent_id);
@@ -149,6 +161,16 @@ function taskStages(workspace: WorkspaceSnapshot): ResearchProgressStage[] {
       taskIds,
     };
   });
+  // A late task.completed event can arrive for a downstream layer before its
+  // current dependency layer publishes the running/completed transition. A
+  // layer is never visually complete while any earlier layer is unresolved.
+  return stages.map((stage, index) => (
+    index > 0
+      && stage.status === "completed"
+      && stages.slice(0, index).some((previous) => previous.status !== "completed")
+      ? { ...stage, status: "pending" }
+      : stage
+  ));
 }
 
 function resultForTool(events: WorkspaceEvent[], call: WorkspaceEvent): WorkspaceEvent | undefined {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildResearchProgress } from "@/lib/progress";
+import { buildResearchProgress, dependencyAwareAgentStatus } from "@/lib/progress";
 import { applyRunEvent, emptyRunWorkspace } from "@/lib/run_workspace";
 import type { WorkspaceSnapshot } from "@/types";
 
@@ -189,6 +189,38 @@ describe("dynamic research progress model", () => {
     const execution = buildResearchProgress(state.snapshots["ordering-run"]).stages
       .filter((stage) => stage.kind === "execution");
     expect(execution.map((stage) => stage.status)).toEqual(["in_progress", "in_progress", "pending"]);
+    const judge = state.snapshots["ordering-run"].agents.find((agent) => agent.id === "judge");
+    expect(dependencyAwareAgentStatus(state.snapshots["ordering-run"], judge!)).toBe("pending");
+  });
+
+  it("keeps a later layer pending when another task in the previous layer is still active", () => {
+    let state = emptyRunWorkspace("session-layer-barrier");
+    state = applyRunEvent(state, {
+      type: "swarm.started",
+      data: {
+        run_id: "layer-barrier-run",
+        preset: "document_review_team",
+        status: "running",
+        agents: [
+          { id: "source", role: "Source" },
+          { id: "review", role: "Review" },
+          { id: "audit", role: "Audit" },
+          { id: "publish", role: "Publish" },
+        ],
+        tasks: [
+          { id: "source-task", agent_id: "source", status: "completed", depends_on: [] },
+          { id: "review-task", agent_id: "review", status: "completed", depends_on: ["source-task"] },
+          { id: "audit-task", agent_id: "audit", status: "in_progress", depends_on: ["source-task"] },
+          // The publish task depends on review, but it must still wait for the
+          // unresolved audit task in the same preceding execution layer.
+          { id: "publish-task", agent_id: "publish", status: "completed", depends_on: ["review-task"] },
+        ],
+      },
+    });
+
+    const execution = buildResearchProgress(state.snapshots["layer-barrier-run"]).stages
+      .filter((stage) => stage.kind === "execution");
+    expect(execution.map((stage) => stage.status)).toEqual(["completed", "in_progress", "pending"]);
   });
 
   it("reconciles stale task snapshots when the server has completed the run", () => {
