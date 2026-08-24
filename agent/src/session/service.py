@@ -331,6 +331,7 @@ class SessionService:
             Result dictionary containing status, run_dir, run_id, metrics, and related fields.
         """
         from src.tools import build_registry
+        from src.agent.swarm_authorization import build_swarm_authorization
         from src.providers.chat import ChatLLM
         from src.agent.loop import AgentLoop
         from src.memory.persistent import PersistentMemory
@@ -341,6 +342,7 @@ class SessionService:
 
         session_id = attempt.session_id
         attempt_id = attempt.attempt_id
+        swarm_authorization = build_swarm_authorization(attempt.prompt)
         loop = asyncio.get_running_loop()
 
         safe_overrides = sanitize_session_overrides(session_config) if session_config else session_config
@@ -388,6 +390,7 @@ class SessionService:
                 session_id=session_id,
                 event_callback=event_callback,
                 cancel_checker=cancel_checker,
+                swarm_authorization=swarm_authorization,
                 warn_callback=_mcp_collision_warn,
             ),
         )
