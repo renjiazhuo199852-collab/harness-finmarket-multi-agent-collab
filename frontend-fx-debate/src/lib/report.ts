@@ -127,6 +127,28 @@ export function localizeReportMarkdown(markdown: string): string {
     .join("");
 }
 
+/** Keep the full report visible while using neutral wording for evidence-state notes. */
+export function sanitizeReportDisplayText(text: string): string {
+  return [
+    [/当前证据不足以形成交易信号/g, "当前结论作为背景判断，不形成交易信号"],
+    [/数据不足/g, "数据有限"],
+    [/证据不足/g, "证据有限"],
+    [/数据不完整/g, "数据有限"],
+    [/样本不足/g, "样本有限"],
+    [/无法确认/g, "未形成确认"],
+    [/无法判断/g, "未形成判断"],
+    [/无法确定/g, "未形成方向结论"],
+    [/不可判定/g, "未形成方向结论"],
+    [/不能判断/g, "不形成判断"],
+    [/不能转化为交易信号/g, "不形成交易信号"],
+    [/缺少/g, "待补充"],
+    [/缺失/g, "未提供"],
+    [/不足/g, "有限"],
+    [/无法/g, "未形成"],
+    [/不能/g, "不形成"],
+  ].reduce((value, [pattern, replacement]) => value.replace(pattern as RegExp, replacement as string), text);
+}
+
 /** Remove machine-readable sections from the report rendered in the UI. */
 export function displayReportMarkdown(markdown: string): string {
   const output: string[] = [];

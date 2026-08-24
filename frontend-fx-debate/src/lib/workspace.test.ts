@@ -182,6 +182,35 @@ describe("FX workspace event reducer", () => {
     expect(snapshot.report?.markdown).toContain("FinalDecision");
   });
 
+  it("hydrates the degraded presentation summary without inventing price levels", () => {
+    const snapshot = hydrateRun("session-presentation", {
+      id: "run-presentation",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [],
+      tasks: [],
+      final_report: JSON.stringify({
+        decision: "wait",
+        confidence: 0.85,
+        trade_plan: { entry_zone: null, stop_loss: null, targets: [] },
+        presentation: {
+          market_background: "美元历史基本面背景偏强，EUR/USD 宏观背景偏空",
+          background_strength: "low",
+          technical_confirmation: "无法确认：4H 无数据，1D 仅 21 根（1D 已达到 20 根观察门槛，完整确认仍需 50 根）",
+          data_quality: "degraded",
+          summary: "宏观背景偏空，但缺少价格和事件确认，不能转化为交易信号",
+          usable_evidence: ["US PMI 高于 EU PMI"],
+          limitations: ["4H bar_count=0"],
+        },
+      }),
+    });
+
+    expect(snapshot.report?.presentation?.marketBackground).toContain("宏观背景偏空");
+    expect(snapshot.report?.presentation?.technicalConfirmation).toContain("4H 无数据");
+    expect(snapshot.report?.entry).toBeUndefined();
+    expect(snapshot.report?.stopLoss).toBeUndefined();
+  });
+
   it("replays persisted swarm events so historical logs keep tool and MCP layers", () => {
     const snapshot = hydrateRun("session-1", {
       id: "run-history",

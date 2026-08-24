@@ -8,9 +8,9 @@ import {
 import { ApiError, api } from "@/lib/api";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { SettingsView } from "@/components/SettingsView";
-import { buildReportDownloadMarkdown, displayReportMarkdown, downloadTextFile, localizeReportMarkdown } from "@/lib/report";
+import { buildReportDownloadMarkdown, displayReportMarkdown, downloadTextFile, localizeReportMarkdown, sanitizeReportDisplayText } from "@/lib/report";
 import { SessionTransport, type SSEStatus } from "@/lib/sse";
-import { buildResearchProgress, dependencyAwareAgentStatus, type ProgressStageStatus, type ResearchProgressStage } from "@/lib/progress";
+import { buildResearchProgress, dependencyAwareAgentStatus, stageAwareAgentStatus, type ProgressStageStatus, type ResearchProgressStage } from "@/lib/progress";
 import { activeSnapshot, applyRunEvent, emptyRunWorkspace, hydrateReportsFromMessages, hydrateRunSnapshot, markActiveRunCancelled, needsRunHydration, replaceRunSummaries, runIdFromEvent, selectRun as selectRunState } from "@/lib/run_workspace";
 import { isRunActive, settleCancellation } from "@/lib/run_controls";
 import { AGENT_TEAM_CATEGORIES, agentResponsibility, agentRoleLabel, isCatalogVisible, isCorePreset, presetDisplay, taskLabel, variableLabels, type AgentTeamCategory } from "@/lib/swarmZhCN";
@@ -388,10 +388,10 @@ function ResearchProgressPanel({ workspace, onView, onSelectAgent }: { workspace
   </section>;
 }
 
-function AgentCard({ agent, selected, onSelect, pendingText, workspace }: { agent: AgentSnapshot; selected: boolean; onSelect: () => void; pendingText?: string; workspace: WorkspaceSnapshot }): ReactElement {
+function AgentCard({ agent, selected, onSelect, pendingText, workspace, stageStatus }: { agent: AgentSnapshot; selected: boolean; onSelect: () => void; pendingText?: string; workspace: WorkspaceSnapshot; stageStatus: ProgressStageStatus }): ReactElement {
   const meta = agentUi(agent);
   const Icon = meta.icon;
-  const displayStatus = workspaceAgentStatus(workspace, agent);
+  const displayStatus = stageAwareAgentStatus(stageStatus, workspaceAgentStatus(workspace, agent));
   const transientFailure = workspace.status === "running" && agent.status === "failed";
   const activity = ["pending", "blocked"].includes(displayStatus)
     ? pendingText || "等待上一阶段完成"
@@ -448,7 +448,7 @@ function CanvasView({ workspace, onSelect, selectedAgentId }: { workspace: Works
           <p className="dag-stage-detail">{stage.detail}</p>
           <div className="canvas-column">{stage.agentIds.map((agentId) => {
             const agent = byId.get(agentId);
-            return agent ? <AgentCard key={agent.id} agent={agent} pendingText={pendingMessage(agent)} workspace={workspace} onSelect={() => onSelect(agent)} selected={selectedAgentId === agent.id} /> : null;
+            return agent ? <AgentCard key={agent.id} agent={agent} pendingText={pendingMessage(agent)} workspace={workspace} stageStatus={stage.status} onSelect={() => onSelect(agent)} selected={selectedAgentId === agent.id} /> : null;
           })}</div>
         </section>
       </div>)}</div>}
@@ -695,7 +695,7 @@ function LogsView({ events, runStatus, onSelect }: { events: WorkspaceEvent[]; r
   const filtered = filter === "ALL" ? events : events.filter((event) => event.layer === filter);
   return <div className="workspace-view logs-view">
     <div className="view-heading"><div><span className="eyebrow">EVENT STREAM</span><h2>流程日志</h2><p>完整调用链：Agent → Tool → MCP → SDK → Database。MCP 阶段来自本次真实查询，点击事件查看完整输入输出。</p></div><div className="filter-row">{["ALL", "AGENT", "TOOL", "MCP", "SDK", "DATABASE", "SYSTEM"].map((value) => <button className={filter === value ? "filter-active" : ""} key={value} onClick={() => setFilter(value)}>{value === "ALL" ? "全部" : value}</button>)}</div></div>
-    {filtered.length === 0 ? <EmptyState title={filter === "MCP" ? "本次运行没有 MCP 事件" : "暂无流程事件"} detail={filter === "MCP" ? "当前运行未记录 MCP 数据服务调用；若数据源使用 Excel，这是预期行为。切换到全部可查看其他事件。" : "事件会随 Session SSE 实时到达。"} /> : <div className="event-table"><div className="event-row event-head"><span>时间</span><span>层级</span><span>Agent / 操作</span><span>状态</span><span>输入输出</span></div>{[...filtered].reverse().map((event) => <button className="event-row" key={event.id} onClick={() => onSelect(event)}><time>{time(event.timestamp)}</time><EventLayerPill layer={event.layer} /><span className="event-name"><strong>{event.layer === "MCP" ? mcpStageDisplayName(event) : event.label}</strong><small>{event.agentId || event.taskId || "系统"}</small></span><StatusPill status={visibleEventStatus(event, runStatus)} /><span className="event-open">查看 <ChevronRight size={14} /></span></button>)}</div>}
+    {filtered.length === 0 ? <EmptyState title={filter === "MCP" ? "本次运行没有 MCP 事件" : "暂无流程事件"} detail={filter === "MCP" ? "当前运行未记录 MCP 数据服务调用；请检查启动时的 MCP 数据烟测和当前运行的数据源配置。切换到全部可查看其他事件。" : "事件会随 Session SSE 实时到达。"} /> : <div className="event-table"><div className="event-row event-head"><span>时间</span><span>层级</span><span>Agent / 操作</span><span>状态</span><span>输入输出</span></div>{[...filtered].reverse().map((event) => <button className="event-row" key={event.id} onClick={() => onSelect(event)}><time>{time(event.timestamp)}</time><EventLayerPill layer={event.layer} /><span className="event-name"><strong>{event.layer === "MCP" ? mcpStageDisplayName(event) : event.label}</strong><small>{event.agentId || event.taskId || "系统"}</small></span><StatusPill status={visibleEventStatus(event, runStatus)} /><span className="event-open">查看 <ChevronRight size={14} /></span></button>)}</div>}
   </div>;
 }
 
@@ -717,21 +717,43 @@ function reportAgents(workspace: WorkspaceSnapshot): Array<{ agentId: string; ta
   });
 }
 
+function reportDisplayText(text: string): string {
+  return sanitizeReportDisplayText(localizeReportMarkdown(text));
+}
+
+function visibleReportLogic(items?: string[]): string[] {
+  return (items || []).map(reportDisplayText).filter(Boolean);
+}
+
 function ReportView({ report, workspace }: { report?: WorkspaceSnapshot["report"]; workspace: WorkspaceSnapshot }): ReactElement {
   if (!report) return <div className="workspace-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>最终结果由本次路由选中的实际处理链路生成。</p></div></div><EmptyState title="报告尚未生成" detail={workspace.status === "failed" ? workspace.lastError || "本次运行失败，请查看流程日志。" : "等待当前处理链路完成。"} /></div>;
   const agentReportItems = reportAgents(workspace);
   const downloadContent = buildReportDownloadMarkdown(report, agentReportItems, workspace.variables.target || workspace.variables.symbol);
-  const localizedMarkdown = report.markdown ? localizeReportMarkdown(displayReportMarkdown(report.markdown)) : undefined;
+  const localizedMarkdown = report.markdown ? sanitizeReportDisplayText(localizeReportMarkdown(displayReportMarkdown(report.markdown))) : undefined;
   const downloadName = `${(workspace.variables.target || workspace.variables.symbol || "fx-debate").replace(/[^a-zA-Z0-9_-]+/g, "-")}-研究报告-${new Date().toISOString().slice(0, 10)}.md`;
-  return <div className="workspace-view report-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>先展示辩论裁决全文，再列出各研究节点的完整报告。</p></div><StatusPill status={workspace.status} /></div>
+  const presentation = report.presentation;
+  const background = presentation?.marketBackground || report.direction || "宏观背景无法确定";
+  const rawTechnicalConfirmation = presentation?.technicalConfirmation;
+  const technicalConfirmation = presentation?.dataQuality === "degraded" ? "未形成技术交易信号" : reportDisplayText(rawTechnicalConfirmation || "未提供技术确认信息");
+  const backgroundStrength = presentation?.backgroundStrength === "low" ? "低" : presentation?.backgroundStrength === "medium" ? "中" : presentation?.backgroundStrength === "high" ? "高" : presentation?.backgroundStrength || "未提供";
+  const numericConfidence = report.confidence === undefined ? undefined : Number(report.confidence);
+  const confidence = typeof numericConfidence === "number" && Number.isFinite(numericConfidence) && presentation?.dataQuality === "degraded"
+    ? Math.min(numericConfidence, 0.35)
+    : report.confidence;
+  const unavailablePriceText = "不适用";
+  const rationale = visibleReportLogic([...(presentation?.usableEvidence || []), ...(report.rationale || [])]);
+  const invalidation = visibleReportLogic(report.invalidation);
+  const risks = visibleReportLogic(report.risks);
+  return <div className="workspace-view report-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>完整呈现裁决、研究节点、数据限制与审计逻辑。</p></div><StatusPill status={workspace.status} /></div>
     <div className="report-actions"><button className="text-button report-download-button" type="button" onClick={() => downloadTextFile(downloadContent, downloadName)} title="下载完整报告"><Download size={15} />下载完整报告</button></div>
     {localizedMarkdown && <section className="report-section report-full-markdown"><div className="report-section-heading"><div><h3>辩论裁决最终结果</h3><span>辩论裁决与外汇组合经理</span></div><StatusPill status="completed" /></div><div className="report-markdown"><MarkdownContent>{localizedMarkdown}</MarkdownContent></div></section>}
-    <div className="report-overview"><div className="decision-block"><span>方向判断</span><strong>{localizeReportMarkdown(report.direction || "等待确认")}</strong><small>置信度：{report.confidence ?? "未提供"}</small></div><div className="decision-block"><span>交易动作</span><strong>{localizeReportMarkdown(report.action || "暂不交易")}</strong><small>{localizeReportMarkdown(report.holdingPeriod || "等待条件满足")}</small></div>{report.probabilities && <div className="probability-block"><span>概率分布</span>{Object.entries(report.probabilities).map(([key, value]) => <div className="probability" key={key}><label>{key === "bullish" ? "看涨" : key === "bearish" ? "看跌" : "震荡"}<b>{value ?? "-"}</b></label><div><i style={{ width: `${Math.min(100, Number(value || 0) * (Number(value || 0) <= 1 ? 100 : 1))}%` }} /></div></div>)}</div>}</div>
-    <div className="report-grid">{[["入场区间", report.entry], ["止损", report.stopLoss], ["止盈", report.takeProfit]].map(([label, value]) => <div className="report-field" key={label}><span>{label}</span><strong>{value ? localizeReportMarkdown(value) : "不适用"}</strong></div>)}</div>
-    {report.rationale && <section className="report-section"><h3>核心依据</h3><ul>{report.rationale.map((item) => <li key={item}>{localizeReportMarkdown(item)}</li>)}</ul></section>}
-    {report.invalidation && <section className="report-section"><h3>失效条件</h3><ul>{report.invalidation.map((item) => <li key={item}>{localizeReportMarkdown(item)}</li>)}</ul></section>}
-    {report.risks && <section className="report-section risk-section"><h3>风险提示</h3><ul>{report.risks.map((item) => <li key={item}>{localizeReportMarkdown(item)}</li>)}</ul></section>}
-    {agentReportItems.length > 0 && <section className="report-section report-agent-reports"><div className="report-section-heading"><div><h3>研究节点完整报告</h3><span>前三个分析师与外汇风险分析师</span></div><span>{agentReportItems.length} 份</span></div>{agentReportItems.map((item) => <article className="agent-report-section" key={item.taskId}><div className="agent-report-heading"><div><h4>{item.role}</h4><span>研究节点报告</span></div><StatusPill status={item.status || "completed"} /></div><div className="report-markdown"><MarkdownContent>{localizeReportMarkdown(displayReportMarkdown(item.report))}</MarkdownContent></div></article>)}</section>}
+    <div className="report-overview"><div className="decision-block"><span>市场背景</span><strong>{reportDisplayText(background)}</strong><small>证据强度：{backgroundStrength} · 置信度：{confidence ?? "未提供"}</small></div><div className="decision-block"><span>技术确认</span><strong>{technicalConfirmation}</strong><small>{presentation?.dataQuality === "degraded" ? "观察级结论" : "技术确认已形成"}</small></div><div className="decision-block"><span>交易动作</span><strong>{reportDisplayText(report.action || "暂不交易")}</strong><small>{reportDisplayText(report.holdingPeriod || report.action || "执行计划")}</small></div>{report.probabilities && <div className="probability-block"><span>概率分布</span>{Object.entries(report.probabilities).map(([key, value]) => <div className="probability" key={key}><label>{key === "bullish" ? "看涨" : key === "bearish" ? "看跌" : "震荡"}<b>{value ?? "-"}</b></label><div><i style={{ width: `${Math.min(100, Number(value || 0) * (Number(value || 0) <= 1 ? 100 : 1))}%` }} /></div></div>)}</div>}</div>
+    <div className="report-grid">{[["入场区间", report.entry], ["止损", report.stopLoss], ["止盈", report.takeProfit]].map(([label, value]) => <div className="report-field" key={label}><span>{label}</span><strong>{value ? reportDisplayText(value) : unavailablePriceText}</strong></div>)}</div>
+    {presentation && <section className="report-section"><h3>有效信息与数据限制</h3><p>{reportDisplayText(presentation.summary)}</p>{presentation.usableEvidence.length > 0 && <ul>{presentation.usableEvidence.map((item) => <li key={item}>{reportDisplayText(item)}</li>)}</ul>}{presentation.limitations.length > 0 && <ul className="report-limitations">{presentation.limitations.map((item) => <li key={item}>{reportDisplayText(item)}</li>)}</ul>}</section>}
+    {rationale.length > 0 && <section className="report-section"><h3>核心依据</h3><ul>{rationale.map((item) => <li key={item}>{item}</li>)}</ul></section>}
+    {invalidation.length > 0 && <section className="report-section"><h3>失效条件</h3><ul>{invalidation.map((item) => <li key={item}>{item}</li>)}</ul></section>}
+    {risks.length > 0 && <section className="report-section risk-section"><h3>风险提示</h3><ul>{risks.map((item) => <li key={item}>{item}</li>)}</ul></section>}
+    {agentReportItems.length > 0 && <section className="report-section report-agent-reports"><div className="report-section-heading"><div><h3>研究节点完整报告</h3><span>前三个分析师与外汇风险分析师</span></div><span>{agentReportItems.length} 份</span></div>{agentReportItems.map((item) => <article className="agent-report-section" key={item.taskId}><div className="agent-report-heading"><div><h4>{item.role}</h4><span>研究节点报告</span></div><StatusPill status={item.status || "completed"} /></div><div className="report-markdown"><MarkdownContent>{sanitizeReportDisplayText(localizeReportMarkdown(displayReportMarkdown(item.report)))}</MarkdownContent></div></article>)}</section>}
   </div>;
 }
 
@@ -1068,7 +1090,8 @@ export default function App(): ReactElement {
     }
   };
 
-  const quickPrompt = "分析 EURUSD 未来两周走势，结合 4H 和 1D 周期，给出平衡风险偏好的交易建议，并明确入场、止损、止盈和失效条件。";
+  const debateExamplePrompt = "分析 EURUSD 未来两周走势。";
+  const latestRateExamplePrompt = "查询美元兑欧元最新汇率";
   const backendConnection = BACKEND_CONNECTION_COPY[backendConnectionStatus];
 
   return <div className="app-shell">
@@ -1088,7 +1111,7 @@ export default function App(): ReactElement {
       {activeView === "settings" && <SettingsView />}
       </main>
     </div>
-    {activeView === "chat" && <footer className="composer-wrap"><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="描述你想研究的外汇问题…" rows={2} /><div className="composer-bottom"><button className="prompt-button" onClick={() => setDraft(quickPrompt)} title="填入 EURUSD 示例问题">EURUSD 示例</button><span>Enter 发送 · Shift+Enter 换行</span><button className="send-button" disabled={runActive || !draft.trim()} onClick={() => void send()} title={runActive ? "运行中" : "发送"}>{runActive ? <Square size={16} /> : <Send size={16} />}</button></div></div>{runActive && <button className="cancel-button" disabled={cancelling} onClick={() => void cancelRun()}><Square size={14} />{cancelling ? "正在停止…" : "停止运行"}</button>}</footer>}
+    {activeView === "chat" && <footer className="composer-wrap"><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="描述你想研究的外汇问题…" rows={2} /><div className="composer-bottom"><div className="prompt-actions"><button className="prompt-button" onClick={() => setDraft(debateExamplePrompt)} title="填入 Debate 示例问题">{debateExamplePrompt}</button><button className="prompt-button" onClick={() => setDraft(latestRateExamplePrompt)} title="填入最新汇率查询示例">{latestRateExamplePrompt}</button></div><span>Enter 发送 · Shift+Enter 换行</span><button className="send-button" disabled={runActive || !draft.trim()} onClick={() => void send()} title={runActive ? "运行中" : "发送"}>{runActive ? <Square size={16} /> : <Send size={16} />}</button></div></div>{runActive && <button className="cancel-button" disabled={cancelling} onClick={() => void cancelRun()}><Square size={14} />{cancelling ? "正在停止…" : "停止运行"}</button>}</footer>}
     {selected && <DetailDrawer title={"role" in selected ? selected.role : selected.label} data={selected} events={workspace.events} workspaceStatus={workspace.status} onClose={() => setSelected(null)} />}
     {workspace.status === "completed" && activeView === "chat" && workspace.report && <button className="floating-report" onClick={() => setView("report")}><FileText size={15} />查看最终报告</button>}
   </div>;

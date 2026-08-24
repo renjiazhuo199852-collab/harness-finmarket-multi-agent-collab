@@ -82,6 +82,67 @@ def test_macro_evidence_ids_include_country_for_same_metric_and_release(
     FxEvidenceStore(tmp_path, context.evidence_context_id).register(bundle.evidence)
 
 
+def test_degraded_bundle_builds_presentable_background_without_four_hour_data() -> None:
+    as_of = datetime(2026, 8, 22, 12, tzinfo=timezone.utc)
+    context = _context(as_of)
+    release_time = as_of - timedelta(days=23)
+    rows = [
+        {
+            "metric_id": f"{country}_{metric_id}",
+            "release_time": release_time,
+            "frequency": "monthly",
+            "value": value,
+            "previous_value": None,
+            "forecast_value": None,
+            "revised_value": None,
+            "unit": "percent" if "UNEMPLOYMENT" in metric_id or "CPI" in metric_id else "index",
+            "source": "EXCEL",
+            "source_identifier": f"{country}-{metric_id}",
+            "country": country,
+        }
+        for metric_id, country, value in (
+            ("PMI_MANUFACTURING", "EU", 52.0),
+            ("PMI_MANUFACTURING", "US", 53.3),
+            ("PMI_SERVICES", "EU", 51.6),
+            ("PMI_SERVICES", "US", 54.0),
+            ("UNEMPLOYMENT", "EU", 6.27),
+            ("UNEMPLOYMENT", "US", 4.27),
+            ("CPI_YOY", "EU", 3.0),
+            ("CPI_YOY", "US", 3.86),
+        )
+    ]
+
+    bundle = FxEvidenceFactory().build(
+        context,
+        _StaticSource(
+            RawFxSnapshot(
+                source_name="excel",
+                macro=rows,
+                bars=[
+                    {
+                        "bar_time": as_of - timedelta(days=offset),
+                        "frequency": "daily",
+                        "open": 1.10,
+                        "high": 1.11,
+                        "low": 1.09,
+                        "close": 1.10,
+                    }
+                    for offset in range(1, 22)
+                ],
+            )
+        ),
+    )
+
+    assert bundle.presentation.market_background == "美元历史基本面背景偏强，EUR/USD 宏观背景偏空"
+    assert bundle.presentation.background_strength == "low"
+    assert "无法确认：4H 无数据，1D 仅 21 根" in bundle.presentation.technical_confirmation
+    assert "完整确认仍需 50 根" in bundle.presentation.technical_confirmation
+    assert bundle.presentation.data_quality == "degraded"
+    assert any("US PMI 高于 EU PMI" in item for item in bundle.presentation.usable_evidence)
+    assert any("1D 观察事实" in item for item in bundle.presentation.usable_evidence)
+    assert any("forecast 缺失" in item for item in bundle.presentation.limitations)
+
+
 def _write_workbook(path, as_of: datetime, *, complete: bool) -> None:
     excel_as_of = as_of.replace(tzinfo=None)
     workbook = Workbook()
@@ -349,6 +410,11 @@ def test_export_like_excel_degrades_without_4h_or_macro_forecasts(tmp_path) -> N
     assert bundle.manifest.overall_status == "partial"
     assert bundle.technical_regime.timeframes["1D"].state == "indeterminate"
     assert bundle.technical_regime.timeframes["1D"].bar_count == 22
+    assert bundle.technical_regime.timeframes["1D"].metrics["latest_close"] == 1.0521
+    assert "ema_50" not in bundle.technical_regime.timeframes["1D"].metrics
+    assert "observation metrics are available" in (
+        bundle.technical_regime.timeframes["1D"].reason or ""
+    )
     assert bundle.technical_regime.timeframes["4H"].state == "indeterminate"
     assert bundle.relative_macro_scorecard.status == "partial"
     assert all(

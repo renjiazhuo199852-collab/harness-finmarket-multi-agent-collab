@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from src.fx_debate.evidence_sources import RawFxSnapshot
+from src.fx_debate.contracts import FinalDecision, PresentationSummary
 from src.swarm.models import SwarmRun
 from src.swarm.store import SwarmStore
 from src.tools.run_fx_debate_tool import (
@@ -18,6 +19,7 @@ from src.tools.run_fx_debate_tool import (
     _extract_json,
     _normalize_run_options,
     _persist_data_trace_events,
+    _apply_presentation,
 )
 from src.fx_debate.models import RunOptions
 
@@ -365,6 +367,9 @@ def test_run_fx_debate_builds_context_validates_dag_outputs_and_renders_report(
     )
     assert output["decision"]["decision"] == "wait"
     assert output["decision"]["canonical_symbol"] == "EURUSD"
+    assert output["decision"]["confidence"] == 0.35
+    assert output["decision"]["presentation"]["data_quality"] == "degraded"
+    assert "技术确认" in output["report_markdown"]
     assert "# EUR/USD 外汇 Debate 结论" in output["report_markdown"]
     assert "当前建议：观望" in output["report_markdown"]
     assert "本地只读 Excel 冻结证据包" in output["report_markdown"]
@@ -379,6 +384,61 @@ def test_run_fx_debate_builds_context_validates_dag_outputs_and_renders_report(
         "decision": "wait",
         "risk_action": "none",
     }
+
+
+def test_degraded_technical_confirmation_forces_directional_decision_to_wait() -> None:
+    decision = FinalDecision.model_validate(
+        {
+            "evidence_context_id": "fxctx-test",
+            "canonical_symbol": "EURUSD",
+            "display_symbol": "EUR/USD",
+            "requested_symbol": "EUR/USD",
+            "inverted": False,
+            "direction_semantics": "EUR 相对 USD",
+            "decision": "long",
+            "confidence": 0.9,
+            "horizon_days": 14,
+            "scenario_probabilities": {"bull": 0.6, "base": 0.2, "bear": 0.2},
+            "thesis": "模型方向判断。",
+            "adopted_claim_ids": [],
+            "rejected_claim_ids": [],
+            "key_evidence_ids": [],
+            "trade_plan": {
+                "entry_zone": [1.08, 1.09],
+                "stop_loss": 1.07,
+                "targets": [1.11],
+            },
+            "risk_assessment": "测试风险。",
+            "invalidation_conditions": [],
+            "missing_data": [],
+            "data_as_of": "2026-08-22T00:00:00+00:00",
+            "next_review_trigger": "补齐数据。",
+        }
+    )
+    bundle = SimpleNamespace(
+        presentation=PresentationSummary(
+            market_background="宏观背景偏空",
+            background_strength="low",
+            technical_confirmation="无法确认：4H 无数据",
+            data_quality="degraded",
+            summary="仅作展示",
+        ),
+        technical_regime=SimpleNamespace(
+            timeframes={
+                "1D": SimpleNamespace(state="indeterminate"),
+                "4H": SimpleNamespace(state="indeterminate"),
+            },
+            quote_quality="stale",
+        ),
+    )
+
+    result = _apply_presentation(decision, bundle)
+
+    assert result.decision == "wait"
+    assert result.confidence == 0.35
+    assert result.trade_plan.entry_zone is None
+    assert result.trade_plan.stop_loss is None
+    assert result.trade_plan.targets == []
 
 
 def test_run_fx_debate_normalizes_common_planner_option_aliases(tmp_path) -> None:

@@ -158,6 +158,16 @@ export interface EvidenceBundle {
   raw?: unknown;
 }
 
+export interface FxPresentationSummary {
+  marketBackground: string;
+  backgroundStrength: string;
+  technicalConfirmation: string;
+  dataQuality: string;
+  summary: string;
+  usableEvidence: string[];
+  limitations: string[];
+}
+
 export interface FxReport {
   direction?: string;
   probabilities?: { bullish?: number; bearish?: number; neutral?: number };
@@ -170,6 +180,7 @@ export interface FxReport {
   rationale?: string[];
   invalidation?: string[];
   risks?: string[];
+  presentation?: FxPresentationSummary;
   markdown?: string;
   raw?: unknown;
 }

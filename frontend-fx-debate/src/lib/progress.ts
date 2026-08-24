@@ -125,6 +125,18 @@ export function dependencyAwareAgentStatus(workspace: WorkspaceSnapshot, agent: 
     : agent.status;
 }
 
+/**
+ * Keep a card from visually outrunning its execution layer. A layer marked
+ * pending is a dependency barrier, even if a stale agent snapshot says that
+ * one of its cards completed.
+ */
+export function stageAwareAgentStatus(stageStatus: ProgressStageStatus, agentStatus: string): string {
+  if (stageStatus === "pending" && ["completed", "in_progress", "running", "retrying"].includes(agentStatus)) {
+    return "pending";
+  }
+  return agentStatus;
+}
+
 function taskLayers(tasks: SwarmTask[]): SwarmTask[][] {
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const memo = new Map<string, number>();

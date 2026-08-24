@@ -177,6 +177,16 @@ def _select_unambiguous_pair(value: Any, target: str) -> ResolvedFxPair:
 
 
 def _parse_timeframe(value: str) -> tuple[str, str]:
+    # Direct tool callers sometimes preserve only the available chart period
+    # (for example ``1D``) after the natural-language router already inferred
+    # the user's default two-week horizon. Keep that shorthand compatible with
+    # the router's existing default instead of rejecting a valid 1D-only run.
+    bare_bars_match = re.fullmatch(
+        r"(?:bars\s*=\s*)?(?P<bars>4h|1d)", value.strip(), re.IGNORECASE
+    )
+    if bare_bars_match is not None:
+        return "2 weeks", bare_bars_match.group("bars").upper()
+
     iso_match = _ISO_TIMEFRAME_PATTERN.fullmatch(value.strip())
     if iso_match is not None:
         return _parse_iso_timeframe(iso_match.group("horizon"), iso_match.group("bars"))

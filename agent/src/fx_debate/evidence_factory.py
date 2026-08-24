@@ -13,7 +13,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.fx_debate.analytics import as_utc_datetime, normalize_bars, technical_metrics
+from src.fx_debate.analytics import (
+    TECHNICAL_CONFIRMATION_MIN_BARS,
+    TECHNICAL_OBSERVATION_MIN_BARS,
+    as_utc_datetime,
+    normalize_bars,
+    technical_metrics,
+)
+from src.fx_debate.contracts import PresentationSummary
 from src.fx_debate.evidence_sources import FxEvidenceSource, RawFxSnapshot
 from src.fx_debate.models import EvidenceContext, EvidenceItem
 
@@ -102,6 +109,7 @@ class EvidenceBundle(_Model):
     relative_macro_scorecard: RelativeMacroScorecard
     technical_regime: TechnicalRegime
     story_clusters: list[StoryCluster]
+    presentation: PresentationSummary
     # Bounded source rows for the operator preview. Agents only access the
     # derived EvidenceItems through Bundle Tools, not this UI projection.
     raw_preview: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
@@ -129,6 +137,14 @@ class FxEvidenceFactory:
         evidence.extend(macro_items)
         stories, news_items, news_manifest = _build_stories(context, raw)
         evidence.extend(news_items)
+        presentation = _build_presentation(
+            context,
+            raw,
+            quote_quality=quote_quality,
+            technical=technical,
+            macro=macro,
+            news_manifest=news_manifest,
+        )
 
         core_statuses = {
             quote_manifest.status,
@@ -156,6 +172,7 @@ class FxEvidenceFactory:
             relative_macro_scorecard=macro,
             technical_regime=technical,
             story_clusters=stories,
+            presentation=presentation,
             raw_preview=_raw_preview(raw, context.as_of),
             raw_counts={
                 "quote": len(raw.prices),
@@ -164,6 +181,195 @@ class FxEvidenceFactory:
                 "news": len(raw.news),
             },
         )
+
+
+def _build_presentation(
+    context: EvidenceContext,
+    raw: RawFxSnapshot,
+    *,
+    quote_quality: Literal["fresh", "stale", "partial", "abnormal", "missing"],
+    technical: TechnicalRegime,
+    macro: RelativeMacroScorecard,
+    news_manifest: DomainManifest,
+) -> PresentationSummary:
+    """Build a display summary without promoting incomplete data to signals."""
+    usable_evidence: list[str] = []
+
+    pmi_rows = _latest_macro_pair_rows(raw, ("PMI_MANUFACTURING", "PMI_SERVICES"))
+    manufacturing = pmi_rows.get("PMI_MANUFACTURING", {})
+    services = pmi_rows.get("PMI_SERVICES", {})
+    eu_manufacturing = _float(manufacturing.get("EU", {}).get("value"))
+    us_manufacturing = _float(manufacturing.get("US", {}).get("value"))
+    eu_services = _float(services.get("EU", {}).get("value"))
+    us_services = _float(services.get("US", {}).get("value"))
+    pmi_supports_us = False
+    if eu_manufacturing is not None and us_manufacturing is not None:
+        pmi_supports_us = us_manufacturing > eu_manufacturing
+        manufacturing_comparison = "高于" if pmi_supports_us else "低于"
+        usable_evidence.append(
+            f"US PMI {manufacturing_comparison} EU PMI（制造业 "
+            f"{us_manufacturing:.2f} vs {eu_manufacturing:.2f}"
+            + (
+                f"；服务业 {us_services:.2f} vs {eu_services:.2f}"
+                if us_services is not None and eu_services is not None
+                else ""
+            )
+            + "，均为历史 actual）"
+        )
+    elif eu_services is not None and us_services is not None:
+        pmi_supports_us = us_services > eu_services
+        services_comparison = "高于" if pmi_supports_us else "低于"
+        usable_evidence.append(
+            f"US 服务业 PMI {services_comparison} EU（{us_services:.2f} vs {eu_services:.2f}，历史 actual）"
+        )
+
+    unemployment = _latest_macro_pair_rows(raw, ("UNEMPLOYMENT",))
+    eu_unemployment = _float(unemployment.get("UNEMPLOYMENT", {}).get("EU", {}).get("value"))
+    us_unemployment = _float(unemployment.get("UNEMPLOYMENT", {}).get("US", {}).get("value"))
+    labor_supports_us = False
+    if eu_unemployment is not None and us_unemployment is not None:
+        labor_supports_us = us_unemployment < eu_unemployment
+        labor_comparison = "低于" if labor_supports_us else "高于"
+        usable_evidence.append(
+            f"US 失业率{labor_comparison} EU（{us_unemployment:.2f}% vs {eu_unemployment:.2f}%，历史 actual）"
+        )
+
+    cpi_rows = _latest_macro_pair_rows(raw, ("CPI_YOY",))
+    eu_cpi = _float(cpi_rows.get("CPI_YOY", {}).get("EU", {}).get("value"))
+    us_cpi = _float(cpi_rows.get("CPI_YOY", {}).get("US", {}).get("value"))
+    if eu_cpi is not None and us_cpi is not None:
+        cpi_comparison = "高于" if us_cpi > eu_cpi else "低于"
+        usable_evidence.append(
+            f"US CPI {cpi_comparison} EU（{us_cpi:.2f}% vs {eu_cpi:.2f}%；仅作事实，不代表当前政策方向）"
+        )
+
+    if pmi_supports_us or labor_supports_us:
+        market_background = "美元历史基本面背景偏强，EUR/USD 宏观背景偏空"
+        summary = "宏观背景偏空，但缺少价格和事件确认，不能转化为交易信号"
+    elif usable_evidence:
+        market_background = "宏观 actual 可读，但不足以形成可执行方向"
+        summary = "已有宏观事实可以汇报，但不能形成当前交易信号"
+    else:
+        market_background = "宏观背景无法确定"
+        summary = "当前证据不足以形成方向背景或交易信号"
+
+    daily_state = technical.timeframes.get("1D")
+    four_hour_state = technical.timeframes.get("4H")
+    daily_count = daily_state.bar_count if daily_state else 0
+    four_hour_count = four_hour_state.bar_count if four_hour_state else 0
+    if four_hour_count == 0:
+        observation_note = (
+            f"（1D 已达到 {TECHNICAL_OBSERVATION_MIN_BARS} 根观察门槛，"
+            f"完整确认仍需 {TECHNICAL_CONFIRMATION_MIN_BARS} 根）"
+            if daily_count >= TECHNICAL_OBSERVATION_MIN_BARS
+            else ""
+        )
+        technical_confirmation = (
+            f"无法确认：4H 无数据，1D 仅 {daily_count} 根{observation_note}"
+        )
+    elif (daily_state and daily_state.state == "indeterminate") or (
+        four_hour_state and four_hour_state.state == "indeterminate"
+    ):
+        technical_confirmation = (
+            f"无法确认：4H {four_hour_count} 根，1D {daily_count} 根；"
+            f"观察门槛为 {TECHNICAL_OBSERVATION_MIN_BARS} 根，"
+            f"完整确认仍需 {TECHNICAL_CONFIRMATION_MIN_BARS} 根"
+        )
+    else:
+        technical_confirmation = "技术状态已计算，但仍需结合新鲜报价确认"
+
+    if daily_state and daily_state.metrics:
+        latest_close = daily_state.metrics.get("latest_close")
+        return_20 = daily_state.metrics.get("return_20")
+        if latest_close is not None:
+            fact = f"1D 观察事实：最新收盘 {latest_close:.5f}"
+            if return_20 is not None:
+                fact += f"，20 根变化 {return_20:+.2%}"
+            usable_evidence.append(fact + "（仅作样本事实，不代表趋势确认）")
+
+    limitations: list[str] = []
+    macro_times = [_safe_datetime(row.get("release_time")) for row in raw.macro]
+    macro_times = [value for value in macro_times if value is not None]
+    if macro_times:
+        ages = [max(0, (context.as_of - value).days) for value in macro_times]
+        age_text = f"{min(ages)}-{max(ages)} 天" if min(ages) != max(ages) else f"{max(ages)} 天"
+        limitations.append(f"宏观数据距 as_of {age_text}")
+    missing_forecasts = sum(1 for row in raw.macro if _float(row.get("forecast_value")) is None)
+    if raw.macro and missing_forecasts:
+        limitations.append(f"{missing_forecasts}/{len(raw.macro)} forecast 缺失")
+    if macro.status != "complete" and not any(
+        signal.relationship != "unknown" for signal in macro.signals
+    ):
+        limitations.append("宏观相对计分卡无法形成可比方向")
+    limitations.extend([
+        f"4H bar_count={four_hour_count}",
+        f"1D bar_count={daily_count}",
+    ])
+    if quote_quality != "fresh":
+        quote_times = [
+            value
+            for value in (_safe_datetime(row.get("price_time")) for row in raw.prices)
+            if value is not None
+        ]
+        quote_time = max(quote_times) if quote_times else None
+        if quote_time is None:
+            limitations.append("quote 不可用")
+        else:
+            limitations.append(f"quote 过期 {max(0, (context.as_of - quote_time).days)} 天")
+    if not raw.news or news_manifest.status == "insufficient_evidence":
+        limitations.append("news/event 不可用")
+    if not limitations:
+        data_quality: Literal["complete", "partial", "degraded"] = "complete"
+    elif (four_hour_state and four_hour_state.state == "indeterminate") or quote_quality != "fresh":
+        data_quality = "degraded"
+    else:
+        data_quality = "partial"
+
+    return PresentationSummary(
+        market_background=market_background,
+        background_strength="low",
+        technical_confirmation=technical_confirmation,
+        data_quality=data_quality,
+        summary=summary,
+        usable_evidence=usable_evidence,
+        limitations=limitations,
+    )
+
+
+def _latest_macro_pair_rows(
+    raw: RawFxSnapshot, metric_ids: tuple[str, ...]
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Return the latest actual row for each requested metric and country."""
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in raw.macro:
+        metric_id = str(row.get("metric_id") or "").upper()
+        matched = next(
+            (
+                candidate
+                for candidate in metric_ids
+                if metric_id == candidate
+                or metric_id.endswith(f"_{candidate}")
+                or (candidate == "CPI_YOY" and metric_id in {"CPI", "CPI_YOY"})
+            ),
+            None,
+        )
+        if matched is None:
+            continue
+        country = str(row.get("country") or "").upper()
+        release_time = _safe_datetime(row.get("release_time"))
+        if country not in {"EU", "US"} or release_time is None:
+            continue
+        current = result.setdefault(matched, {}).get(country)
+        if current is None or release_time > current["_release_time"]:
+            result[matched][country] = {**row, "_release_time": release_time}
+    return result
+
+
+def _safe_datetime(value: Any) -> datetime | None:
+    try:
+        return as_utc_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 _CURRENCY_COUNTRY = {
@@ -382,9 +588,16 @@ def _build_technical(
     missing_data: list[str] = []
     for timeframe in ("1D", "4H"):
         bars = inputs[timeframe]
-        metrics = technical_metrics(bars, periods_per_year=periods[timeframe])
+        metrics = technical_metrics(
+            bars,
+            periods_per_year=periods[timeframe],
+            min_bars=TECHNICAL_OBSERVATION_MIN_BARS,
+        )
         if not metrics:
-            reason = f"{timeframe} requires at least 50 complete bars"
+            reason = (
+                f"{timeframe} requires at least "
+                f"{TECHNICAL_OBSERVATION_MIN_BARS} complete bars for observation"
+            )
             missing_data.append(reason)
             states[timeframe] = TechnicalTimeframeState(
                 timeframe=timeframe,
@@ -424,13 +637,27 @@ def _build_technical(
                     quality_status="fresh",
                 )
             )
+        full_confirmation = (
+            len(bars) >= TECHNICAL_CONFIRMATION_MIN_BARS
+            and "ema_50" in metric_values
+            and "return_20" in metric_values
+        )
+        reason = None
+        if not full_confirmation:
+            reason = (
+                f"{timeframe} has {len(bars)} complete bars; observation metrics are "
+                f"available, but full confirmation requires "
+                f"{TECHNICAL_CONFIRMATION_MIN_BARS} bars"
+            )
+            missing_data.append(reason)
         states[timeframe] = TechnicalTimeframeState(
             timeframe=timeframe,
-            state=_technical_state(metric_values),
+            state=_technical_state(metric_values) if full_confirmation else "indeterminate",
             bar_count=len(bars),
             latest_bar_time=bars[-1]["bar_time"],
             metrics=metric_values,
             evidence_ids=ids,
+            reason=reason,
         )
     status: Status = (
         "complete"

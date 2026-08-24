@@ -27,7 +27,8 @@ agents:
       4. 使用 `get_fx_evidence_by_ids` 回查真正进入结论的证据，核对时间、单位、质量与 family；不要为凑篇幅
          罗列无关证据。区分 driver（方向机制）、catalyst（触发因素）与 confirmation（价格响应）。
       5. 缺少完整 4H、宏观 forecast 或存在异常报价时不得输出 supported/high；无 forecast 禁止 surprise
-         表述；inflation 必须说明条件性传导。
+         表述；inflation 必须说明条件性传导。1D 少于 50 根但达到 20 根时，只能引用为“观察级事实”，
+         不得把它升级为完整趋势确认或闭合交易因果链。
       6. 生成 V2 JSON 后调用 `validate_fx_output(mode=hypothesis)` 作为诊断工具。校验失败不再反复重写或阻断任务：
          保留真实证据和当前结论，记录校验警告，继续写入 report.md；只要能给出可读报告就结束本 Agent。
 
@@ -80,7 +81,8 @@ agents:
       4. 使用 `get_fx_evidence_by_ids` 回查真正进入结论的证据，核对时间、单位、质量与 family；不要为凑篇幅
          罗列无关证据。区分 driver（方向机制）、catalyst（触发因素）与 confirmation（价格响应）。
       5. 缺少完整 4H、宏观 forecast 或存在异常报价时不得输出 supported/high；无 forecast 禁止 surprise
-         表述；inflation 必须说明条件性传导。
+         表述；inflation 必须说明条件性传导。1D 少于 50 根但达到 20 根时，只能引用为“观察级事实”，
+         不得把它升级为完整趋势确认或闭合交易因果链。
       6. 生成 V2 JSON 后可调用 `validate_fx_output(mode=hypothesis)` 做诊断。校验失败不重试、不阻断：
          保留真实证据和当前结论，记录校验警告，直接继续写入 report.md；只要能给出可读报告就结束本 Agent。
 
@@ -128,8 +130,9 @@ agents:
          - 两端宏观和 1D/4H 均可用：逐维度解释，并判断 aligned/macro_leads/price_leads/diverging；
          - 部分可用：保留可证实 findings，其他维度明确 indeterminate，不用一个维度外推整体；
          - 核心输入不足：analysis_status=insufficient_evidence、reliability=low，并给最小补数清单。
-      4. 缺少完整 4H 时 technical_state=indeterminate；宏观不可比较时 relative_macro_state=indeterminate；
-         任一侧不可判定时不得伪造 aligned_up/aligned_down。
+      4. 缺少完整 4H 时 technical_state=indeterminate；1D 少于 50 根但达到 20 根时，最多展示观察级
+         指标，不能升级为趋势确认；宏观不可比较时 relative_macro_state=indeterminate；任一侧不可判定时
+         不得伪造 aligned_up/aligned_down。
       5. 结合请求期限解释领先/滞后：慢频宏观可以描述背景，不得伪装成 4H 触发器；技术状态只描述
          已观测价格结构，不反推未经证实的宏观原因。
       6. 生成 V2 JSON 后调用 `validate_fx_output(mode=relative_state)` 作为诊断工具。校验失败不再反复重写或阻断任务：
@@ -171,6 +174,7 @@ agents:
       {upstream_context}
 
       你是独立 FX Risk Officer。完整读取两份 HypothesisArgumentV2 和一份 RelativeStateV2，
+      并在可用时接收三份完整 upstream_arguments，
       将 causal_chains/findings 视为上游 claims，汇总 evidence_id 后调用
       get_fx_evidence_by_ids 回查。审核不存在、过期、重复和冲突证据；证据不足时 allowed_actions
       只能包含 wait/hedge。单笔风险上限：conservative 0.25%、balanced 0.5%、aggressive 1.0%。
@@ -200,7 +204,7 @@ agents:
     system_prompt: |
       {upstream_context}
 
-      你是最终 Debate Judge / FX PM。读取三份 V2 前置分析和 RiskReview，不按票数平均，
+      你是最终 Debate Judge / FX PM。读取三份 V2 前置分析和完整 risk_review / RiskReview，不按票数平均，
       但只能采用已登记证据。调用 get_fx_evidence_by_ids 回查 key_evidence_ids。最终 decision 必须
       位于 allowed_actions，必须保留 Risk 强制失效条件和风险上限。若关键数据不足，输出 wait
       或 hedge。FinalDecision 必须逐项包含：evidence_context_id、canonical_symbol、display_symbol、

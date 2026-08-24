@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReportDownloadMarkdown, displayReportMarkdown, localizeReportMarkdown } from "@/lib/report";
+import { buildReportDownloadMarkdown, displayReportMarkdown, localizeReportMarkdown, sanitizeReportDisplayText } from "@/lib/report";
 
 describe("report presentation helpers", () => {
   it("localizes report headings and statuses without changing identifiers", () => {
@@ -43,5 +43,16 @@ describe("report presentation helpers", () => {
     expect(displayed).not.toContain("机器可读 V2");
     expect(displayed).not.toContain('"decision"');
     expect(displayed).not.toContain("FX_BUNDLE_ERROR");
+  });
+
+  it("keeps report logic while neutralizing evidence-state wording for the page", () => {
+    const displayed = sanitizeReportDisplayText("证据不足，无法判断方向；缺少价格确认，但宏观判断偏空。");
+
+    expect(displayed).toContain("证据有限");
+    expect(displayed).toContain("未形成判断");
+    expect(displayed).toContain("待补充价格确认");
+    expect(displayed).toContain("宏观判断偏空");
+    expect(displayed).not.toContain("证据不足");
+    expect(displayed).not.toContain("无法判断");
   });
 });

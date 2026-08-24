@@ -13,6 +13,18 @@ class _Contract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PresentationSummary(_Contract):
+    """Human-readable, deterministic summary for degraded evidence."""
+
+    market_background: str
+    background_strength: Literal["low", "medium", "high"]
+    technical_confirmation: str
+    data_quality: Literal["complete", "partial", "degraded"]
+    summary: str
+    usable_evidence: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class Claim(_Contract):
     claim_id: str
     statement: str
@@ -831,6 +843,7 @@ class FinalDecision(_Contract):
     missing_data: list[str]
     data_as_of: datetime
     next_review_trigger: str
+    presentation: PresentationSummary | None = None
 
     @field_validator("data_as_of")
     @classmethod

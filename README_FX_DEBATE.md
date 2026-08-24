@@ -292,6 +292,41 @@ Embedding、候选模型或存储凭据。部署说明见
 
 ## 启动方式
 
+### 一键启动（推荐）
+
+在本仓库根目录执行：
+
+```bash
+./start_fx_debate.sh
+```
+
+脚本会先检查并停止本脚本配置端口上的旧服务，然后依次建立 SSH 数据库隧道、执行
+MCP stdio 初始化、`unified_search` 工具握手和一次真实数据烟测、启动 AI Search HTTP 服务、启动 FX API
+和 FX Debate 前端，并执行 `/live`、`/health` 健康检查。MCP 握手失败时会停止后续启动，
+避免出现 HTTP 服务在线但 MCP 实际不可用的假状态。
+SSH 使用密码认证时，脚本会在当前终端交互式提示密码；密码不会写入脚本或日志。
+
+常用命令：
+
+```bash
+./start_fx_debate.sh status
+./start_fx_debate.sh stop
+./start_fx_debate.sh version
+FRONTEND_PORT=5899 ./start_fx_debate.sh
+```
+
+默认端口为 SSH 转发 `15433`、AI Search `8011`、FX API `8899`、FX 前端 `5898`。
+AI Search 调试前端不是 FX Debate 的运行依赖；如需同时打开它，可执行：
+
+```bash
+START_AI_SEARCH_FRONTEND=1 ./start_fx_debate.sh
+```
+
+MCP stdio 进程不需要单独常驻：启动脚本会先做一次真实握手，FX API 在每次查询时
+仍按相同配置按需启动短会话。`version` 命令会显示实际工作树的分支、提交和本地改动状态。
+当前启动默认强制 `FX_DEBATE_DATA_SOURCE=ai_search`；只有明确设置 `MCP_REQUIRED=0` 时才允许
+回退到 Excel 或其他数据源。
+
 ### 1. 准备 AI Search MCP 服务
 
 AI Search 是 FX Debate 唯一的数据入口。先按数据端说明准备服务端私有配置和依赖；

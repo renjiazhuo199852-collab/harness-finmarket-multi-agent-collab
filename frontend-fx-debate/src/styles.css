@@ -193,6 +193,7 @@ code, pre, .topbar-center code, .run-id code { font-family: "DM Mono", ui-monosp
 .composer textarea::placeholder { color: var(--text-faint); }
 .composer-bottom { display: flex; align-items: center; gap: 10px; padding: 7px 9px 9px; color: var(--text-faint); font-size: 10px; }
 .composer-bottom span { margin-left: auto; }
+.prompt-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
 .prompt-button { border: 0; background: transparent; color: var(--text-soft); padding: 4px; font-size: 11px; }
 .prompt-button:hover { color: var(--accent); }
 .send-button { width: 31px; height: 31px; display: grid; place-items: center; border: 0; border-radius: 7px; background: var(--accent); color: white; }
@@ -418,6 +419,7 @@ code, pre, .topbar-center code, .run-id code { font-family: "DM Mono", ui-monosp
 }
 
 @media (max-width: 560px) {
+  .composer-bottom { flex-wrap: wrap; }.prompt-actions { flex: 1 1 100%; order: 1; }.composer-bottom span { order: 2; margin-left: 0; }.composer-bottom .send-button { order: 3; margin-left: auto; }
   .swarm-grid, .swarm-capability-summary { grid-template-columns: 1fr; }
   .swarm-card { min-height: 0; }
   .swarm-card h3, .swarm-card p { min-height: 0; }

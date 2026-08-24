@@ -15,6 +15,7 @@ node_modules/
 results/
 
 .env
+.runtime/
 agent/.env
 
 .claude/*

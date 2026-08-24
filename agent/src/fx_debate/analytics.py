@@ -9,6 +9,13 @@ from decimal import Decimal
 from typing import Any
 
 
+# A short sample can be useful for an operator-facing observation, but it is
+# not enough to confirm a trade regime.  Callers that need full confirmation
+# keep the historical 50-bar default below.
+TECHNICAL_OBSERVATION_MIN_BARS = 20
+TECHNICAL_CONFIRMATION_MIN_BARS = 50
+
+
 def normalize_bars(
     rows: list[dict[str, Any]], *, as_of: datetime
 ) -> list[dict[str, Any]]:
@@ -78,30 +85,52 @@ def aggregate_four_hour(
 
 
 def technical_metrics(
-    bars: list[dict[str, Any]], *, periods_per_year: int
+    bars: list[dict[str, Any]],
+    *,
+    periods_per_year: int,
+    min_bars: int = TECHNICAL_CONFIRMATION_MIN_BARS,
 ) -> dict[str, tuple[float, str | None]]:
-    """Calculate the MVP indicator set from ordered OHLC bars."""
-    if len(bars) < 50:
+    """Calculate indicators available for the supplied sample size.
+
+    The default remains the full confirmation contract.  A lower ``min_bars``
+    is only used by the evidence factory for an observation-level preview; any
+    indicator whose lookback does not fit the sample is omitted instead of
+    being calculated from an undersized window.
+    """
+    if len(bars) < min_bars:
         return {}
     closes = [row["close"] for row in bars]
-    metrics: dict[str, tuple[float, str | None]] = {
-        "latest_close": (closes[-1], None),
-        "return_5": (closes[-1] / closes[-6] - 1, "close[-1] / close[-6] - 1"),
-        "return_20": (
+    metrics: dict[str, tuple[float, str | None]] = {"latest_close": (closes[-1], None)}
+    if len(closes) >= 6:
+        metrics["return_5"] = (
+            closes[-1] / closes[-6] - 1,
+            "close[-1] / close[-6] - 1",
+        )
+    if len(closes) >= 21:
+        metrics["return_20"] = (
             closes[-1] / closes[-21] - 1,
             "close[-1] / close[-21] - 1",
-        ),
-        "ema_20": (_ema(closes, 20), "EMA(close, span=20)"),
-        "ema_50": (_ema(closes, 50), "EMA(close, span=50)"),
-        "rsi_14": (_rsi(closes, 14), "RSI(close, period=14)"),
-        "atr_14": (_atr(bars, 14), "ATR(OHLC, period=14)"),
-        "realized_vol_20": (
+        )
+    if len(closes) >= 20:
+        metrics["ema_20"] = (_ema(closes, 20), "EMA(close, span=20)")
+        metrics["high_20"] = (
+            max(row["high"] for row in bars[-20:]),
+            "max(high, 20)",
+        )
+        metrics["low_20"] = (
+            min(row["low"] for row in bars[-20:]),
+            "min(low, 20)",
+        )
+    if len(closes) >= 50:
+        metrics["ema_50"] = (_ema(closes, 50), "EMA(close, span=50)")
+    if len(closes) >= 15:
+        metrics["rsi_14"] = (_rsi(closes, 14), "RSI(close, period=14)")
+        metrics["atr_14"] = (_atr(bars, 14), "ATR(OHLC, period=14)")
+    if len(closes) >= 21:
+        metrics["realized_vol_20"] = (
             _realized_volatility(closes, 20, periods_per_year),
             f"stdev(log returns, 20) * sqrt({periods_per_year})",
-        ),
-        "high_20": (max(row["high"] for row in bars[-20:]), "max(high, 20)"),
-        "low_20": (min(row["low"] for row in bars[-20:]), "min(low, 20)"),
-    }
+        )
     return {
         name: (round(value, 10), calculation)
         for name, (value, calculation) in metrics.items()

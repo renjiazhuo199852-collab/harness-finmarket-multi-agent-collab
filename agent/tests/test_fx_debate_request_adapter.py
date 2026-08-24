@@ -43,6 +43,19 @@ def test_adapter_accepts_explicit_timeframe_labels() -> None:
     assert adapted.resolved_request.timeframe == "4H"
 
 
+def test_adapter_accepts_bare_available_1d_period_with_default_two_week_horizon() -> None:
+    adapted = adapt_fx_pair_debate_request(
+        FxPairDebateRequest(
+            target="EURUSD",
+            timeframe="1D",
+            goal="数据源没有 4H，只使用 1D 做两周背景分析。",
+        )
+    )
+
+    assert adapted.resolved_request.horizon == "2 weeks"
+    assert adapted.resolved_request.timeframe == "1D"
+
+
 def test_adapter_accepts_upstream_iso_timeframe_contract() -> None:
     adapted = adapt_fx_pair_debate_request(
         FxPairDebateRequest(

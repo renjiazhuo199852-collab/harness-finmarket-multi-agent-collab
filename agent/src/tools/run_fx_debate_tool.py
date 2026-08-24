@@ -297,7 +297,7 @@ class RunFxDebateTool(BaseTool):
             },
             "timeframe": {
                 "type": "string",
-                "description": "例如 '2 weeks; 4H/1D'。",
+                "description": "例如 '2 weeks; 4H/1D' 或仅使用可用的 '1D'（默认两周）。",
             },
             "goal": {
                 "type": "string",
@@ -449,7 +449,10 @@ class RunFxDebateTool(BaseTool):
                 raise RuntimeError(f"FX Debate Swarm 未完成：status={execution.status}")
             decision = _validate_all_outputs(execution, context, bundle)
             report_markdown = render_chinese_report(
-                decision, context, data_source=bundle.source_name
+                decision,
+                context,
+                data_source=bundle.source_name,
+                presentation=bundle.presentation,
             )
             response = {
                 "ok": True,
@@ -548,6 +551,7 @@ def build_evidence_preview(
                 mode="json"
             ),
             "technical_regime": bundle.technical_regime.model_dump(mode="json"),
+            "presentation": bundle.presentation.model_dump(mode="json"),
             "story_clusters": [
                 story.model_dump(mode="json") for story in bundle.story_clusters
             ],
@@ -714,9 +718,43 @@ def _validate_all_outputs(
 ) -> FinalDecision:
     """Validate outputs when possible, otherwise deliver a safe wait report."""
     try:
-        return _validate_all_outputs_strict(execution, context, bundle)
+        decision = _validate_all_outputs_strict(execution, context, bundle)
     except (ValidationError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        return _fallback_final_decision(context, bundle, str(exc))
+        decision = _fallback_final_decision(context, bundle, str(exc))
+    return _apply_presentation(decision, bundle)
+
+
+def _apply_presentation(decision: FinalDecision, bundle: EvidenceBundle) -> FinalDecision:
+    """Attach display context and fail closed until both price regimes confirm."""
+    timeframe_states = bundle.technical_regime.timeframes
+    technical_confirmation_ready = (
+        all(
+            timeframe_states.get(timeframe) is not None
+            and timeframe_states[timeframe].state != "indeterminate"
+            for timeframe in ("1D", "4H")
+        )
+        and bundle.technical_regime.quote_quality == "fresh"
+    )
+    degraded = (
+        bundle.presentation.data_quality == "degraded"
+        or not technical_confirmation_ready
+    )
+    confidence_cap = 0.35 if degraded else 1.0
+    effective_decision = decision.decision
+    updates: dict[str, Any] = {
+        "presentation": bundle.presentation,
+        "confidence": min(decision.confidence, confidence_cap),
+    }
+    if not technical_confirmation_ready and decision.decision in {"long", "short"}:
+        # Short 1D samples may support an operator-facing background, but a
+        # directional plan requires both timeframes and a fresh quote.
+        effective_decision = "wait"
+        updates["decision"] = effective_decision
+    if effective_decision in {"wait", "hedge"}:
+        updates["trade_plan"] = decision.trade_plan.model_copy(
+            update={"entry_zone": None, "stop_loss": None, "targets": []}
+        )
+    return decision.model_copy(update=updates)
 
 
 def _configured_evidence_source(
@@ -819,6 +857,7 @@ def render_chinese_report(
     context: EvidenceContext,
     *,
     data_source: str = "database",
+    presentation: Any | None = None,
 ) -> str:
     """Render the validated decision without asking an LLM to rewrite it."""
     action_label = {
@@ -860,6 +899,27 @@ def render_chinese_report(
         if data_source == "ai_search"
         else f"内部 MarketDataReader 冻结证据包（{', '.join(context.provider_priority)}）"
     )
+    presentation_section = ""
+    if presentation is not None:
+        presentation_section = (
+            "## 展示摘要\n\n"
+            f"- 市场背景：{presentation.market_background}\n"
+            f"- 背景强度：{presentation.background_strength}\n"
+            f"- 技术确认：{presentation.technical_confirmation}\n"
+            f"- 数据质量：{presentation.data_quality}\n\n"
+            f"{presentation.summary}\n\n"
+            "### 有效信息\n\n"
+            + (
+                "\n".join(f"- {item}" for item in presentation.usable_evidence)
+                or "- 暂无可用的方向性背景事实"
+            )
+            + "\n\n### 数据限制\n\n"
+            + (
+                "\n".join(f"- {item}" for item in presentation.limitations)
+                or "- 无已知关键限制"
+            )
+            + "\n\n"
+        )
     return (
         f"# {decision.display_symbol} 外汇 Debate 结论\n\n"
         f"- 决策：{action_label}（`{decision.decision}`）\n"
@@ -867,6 +927,7 @@ def render_chinese_report(
         f"- 判断期限：{decision.horizon_days} 天\n"
         f"- 数据截止：{decision.data_as_of.isoformat()}\n"
         f"- 数据政策：{data_policy}\n\n"
+        f"{presentation_section}"
         f"## 核心判断\n\n{decision.thesis}\n\n"
         f"情景概率：上涨 {scenarios.bull:.0%} / 基准 {scenarios.base:.0%} / "
         f"下跌 {scenarios.bear:.0%}。\n\n"

@@ -278,7 +278,7 @@ function extractReport(data: unknown): FxReport | undefined {
   const reportKeys = [
     "direction", "bias", "recommendation", "action", "decision", "confidence", "entry", "entry_range",
     "stop_loss", "take_profit", "trade_plan", "probabilities", "scenario_probabilities", "rationale",
-    "thesis", "risk_assessment", "invalidation", "invalidation_conditions", "markdown",
+    "thesis", "risk_assessment", "invalidation", "invalidation_conditions", "presentation", "markdown",
   ];
   if (!reportKeys.some((key) => key in value)) return undefined;
   const report = value;
@@ -291,6 +291,20 @@ function extractReport(data: unknown): FxReport | undefined {
     : undefined;
   const invalidationValue = report.invalidation || report.invalidation_conditions;
   const invalidation = arrayValue(invalidationValue);
+  const presentationValue = report.presentation && typeof report.presentation === "object"
+    ? report.presentation as Record<string, unknown>
+    : undefined;
+  const presentation = presentationValue
+    ? {
+      marketBackground: asDisplayString(presentationValue.market_background) || "宏观背景无法确定",
+      backgroundStrength: asDisplayString(presentationValue.background_strength) || "low",
+      technicalConfirmation: asDisplayString(presentationValue.technical_confirmation) || "无法确认",
+      dataQuality: asDisplayString(presentationValue.data_quality) || "degraded",
+      summary: asDisplayString(presentationValue.summary) || "当前证据不足以形成交易信号",
+      usableEvidence: arrayValue(presentationValue.usable_evidence) || [],
+      limitations: arrayValue(presentationValue.limitations) || [],
+    }
+    : undefined;
   return {
     direction,
     action,
@@ -307,6 +321,7 @@ function extractReport(data: unknown): FxReport | undefined {
     rationale: arrayValue(report.rationale) || (asDisplayString(report.thesis) ? [asDisplayString(report.thesis)!] : undefined),
     invalidation,
     risks: arrayValue(report.risks) || (asDisplayString(report.risk_assessment) ? [asDisplayString(report.risk_assessment)!] : undefined),
+    presentation,
     markdown: asString(value.markdown),
     raw: value,
   };

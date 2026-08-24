@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildResearchProgress, dependencyAwareAgentStatus } from "@/lib/progress";
+import { buildResearchProgress, dependencyAwareAgentStatus, stageAwareAgentStatus } from "@/lib/progress";
 import { applyRunEvent, emptyRunWorkspace } from "@/lib/run_workspace";
 import type { WorkspaceSnapshot } from "@/types";
 
@@ -250,6 +250,12 @@ describe("dynamic research progress model", () => {
     expect(execution.map((stage) => stage.status)).toEqual(["completed", "in_progress", "pending"]);
     expect(dependencyAwareAgentStatus(snapshot, snapshot.agents[1])).toBe("in_progress");
     expect(dependencyAwareAgentStatus(snapshot, snapshot.agents[2])).toBe("pending");
+  });
+
+  it("clamps stale card completion to a pending execution layer", () => {
+    expect(stageAwareAgentStatus("pending", "completed")).toBe("pending");
+    expect(stageAwareAgentStatus("pending", "in_progress")).toBe("pending");
+    expect(stageAwareAgentStatus("in_progress", "completed")).toBe("completed");
   });
 
   it("reconciles stale task snapshots when the server has completed the run", () => {
