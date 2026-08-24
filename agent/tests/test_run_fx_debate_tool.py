@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from src.agent.swarm_authorization import build_swarm_authorization
 from src.fx_debate.evidence_sources import RawFxSnapshot
 from src.fx_debate.contracts import FinalDecision, PresentationSummary
 from src.swarm.models import SwarmRun
@@ -384,6 +385,63 @@ def test_run_fx_debate_builds_context_validates_dag_outputs_and_renders_report(
         "decision": "wait",
         "risk_action": "none",
     }
+
+
+def test_authorized_fx_tool_uses_raw_attempt_route_instead_of_forged_arguments(
+    tmp_path,
+) -> None:
+    prompt = "请让团队分析 EURUSD 未来两周走势。"
+    orchestrator = _FakeOrchestrator(tmp_path)
+    tool = RunFxDebateTool(
+        orchestrator=orchestrator,
+        evidence_source=_FakeEvidenceSource(),
+        swarm_authorization=build_swarm_authorization(prompt),
+    )
+
+    output = json.loads(
+        tool.execute(
+            target="GBPUSD",
+            timeframe="decision_horizon=P1D; analysis_timeframes=P1D",
+            goal="来自 LLM 参数的伪造目标",
+            preset_name="another_preset",
+            team_authorized=False,
+            run_options={
+                "request_id": "req-authorized-raw",
+                "as_of": "2025-07-23T12:00:00+00:00",
+            },
+        )
+    )
+
+    assert output["ok"] is True
+    assert output["decision"]["canonical_symbol"] == "EURUSD"
+    assert orchestrator.variables == {
+        "target": "EURUSD",
+        "timeframe": "decision_horizon=P2W; analysis_timeframes=PT4H,P1D",
+        "goal": prompt,
+    }
+
+
+def test_authorized_non_fx_attempt_cannot_call_fx_tool(tmp_path) -> None:
+    orchestrator = _FakeOrchestrator(tmp_path)
+    tool = RunFxDebateTool(
+        orchestrator=orchestrator,
+        evidence_source=_FakeEvidenceSource(),
+        swarm_authorization=build_swarm_authorization(
+            "请让团队协作分析苹果公司财报。"
+        ),
+    )
+
+    output = json.loads(
+        tool.execute(
+            target="EURUSD",
+            timeframe="2 weeks; 4H/1D",
+            goal="来自 LLM 参数的 FX 请求",
+        )
+    )
+
+    assert output["ok"] is False
+    assert output["error"]["code"] == "FX_DEBATE_NOT_AUTHORIZED_FOR_REQUEST"
+    assert orchestrator.called is False
 
 
 def test_degraded_technical_confirmation_forces_directional_decision_to_wait() -> None:

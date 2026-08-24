@@ -1002,6 +1002,7 @@ def _run_agent(
             call (SPEC.md Consent §2).
     """
     from src.tools import build_registry
+    from src.agent.swarm_authorization import build_swarm_authorization
     from src.providers.chat import ChatLLM
     from src.agent.loop import AgentLoop
 
@@ -1146,6 +1147,7 @@ def _run_agent(
     agent = AgentLoop(
         registry=build_registry(
             persistent_memory=pm,
+            swarm_authorization=build_swarm_authorization(prompt),
             include_shell_tools=True,
             agent_config=agent_config,
             session_id=session_id or None,

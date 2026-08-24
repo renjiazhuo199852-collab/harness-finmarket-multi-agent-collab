@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Callable
 from src.agent.tools import BaseTool, ToolRegistry
 
 if TYPE_CHECKING:
+    from src.agent.swarm_authorization import SwarmAuthorization
     from src.config.schema import AgentConfig
     from src.memory.persistent import PersistentMemory
 
@@ -71,6 +72,7 @@ def build_registry(
     session_id: str | None = None,
     event_callback: Callable[[str, dict], None] | None = None,
     cancel_checker: Callable[[], bool] | None = None,
+    swarm_authorization: "SwarmAuthorization | None" = None,
     warn_callback: Callable[[str], None] | None = None,
     interactive: bool | None = None,
     _mcp_server_tool_name_segments: Mapping[str, str] | None = None,
@@ -101,6 +103,9 @@ def build_registry(
             mutate session-scoped state.
         cancel_checker: Optional cooperative cancellation check injected into
             long-running session tools such as FX Debate.
+        swarm_authorization: Immutable authorization derived from the current
+            attempt's raw user message. ``None`` preserves legacy non-session
+            callers; a concrete value enables per-attempt hiding and guards.
         warn_callback: Optional callable invoked with operator-facing warning
             messages. When provided, server-name collision warnings are passed
             to this callback in addition to the standard logger so CLI and
@@ -143,6 +148,16 @@ def build_registry(
     registry = ToolRegistry()
     for cls in _discover_subclasses():
         try:
+            if swarm_authorization is not None and cls in {SwarmTool, RunFxDebateTool}:
+                if not swarm_authorization.authorized:
+                    logger.info("Tool %s hidden by current-attempt authorization", cls.name)
+                    continue
+                if cls is RunFxDebateTool and (
+                    swarm_authorization.fx_decision is None
+                    or swarm_authorization.fx_decision.route != "fx_debate"
+                ):
+                    logger.info("Tool %s hidden for non-FX current attempt", cls.name)
+                    continue
             if cls.name in _SHELL_TOOL_NAMES and not include_shell_tools:
                 logger.info("Tool %s disabled by shell tool policy", cls.name)
                 continue
@@ -159,6 +174,7 @@ def build_registry(
                         include_shell_tools=include_shell_tools,
                         event_callback=event_callback,
                         cancel_checker=cancel_checker,
+                        swarm_authorization=swarm_authorization,
                     )
                 )
             elif cls is RunFxDebateTool:
@@ -166,6 +182,7 @@ def build_registry(
                     cls(
                         event_callback=adapt_fx_debate_event_callback(event_callback),
                         cancel_checker=cancel_checker,
+                        swarm_authorization=swarm_authorization,
                     )
                 )
             elif cls is QueryFxDataTool:

@@ -12,6 +12,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from typing import TYPE_CHECKING
 
 from src.agent.tools import BaseTool
 from src.fx_debate.router import (
@@ -22,6 +23,9 @@ from src.fx_debate.router import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from src.agent.swarm_authorization import SwarmAuthorization
 
 _POLL_INTERVAL_SECONDS = 5
 
@@ -774,6 +778,7 @@ class SwarmTool(BaseTool):
         include_shell_tools: bool = False,
         event_callback: Any | None = None,
         cancel_checker: Any | None = None,
+        swarm_authorization: "SwarmAuthorization | None" = None,
     ) -> None:
         """Initialize the swarm launcher.
 
@@ -785,6 +790,7 @@ class SwarmTool(BaseTool):
         self.include_shell_tools = include_shell_tools
         self._event_callback = event_callback
         self._cancel_checker = cancel_checker
+        self._swarm_authorization = swarm_authorization
 
     def _emit_session_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Forward swarm status to the hosting session SSE channel if present."""
@@ -804,6 +810,21 @@ class SwarmTool(BaseTool):
         Returns:
             JSON string with status, preset, variables, final_report, tasks, token_usage.
         """
+        if (
+            self._swarm_authorization is not None
+            and not self._swarm_authorization.authorized
+        ):
+            return json.dumps(
+                {
+                    "status": "error",
+                    "terminal": True,
+                    "retryable": False,
+                    "code": "SWARM_NOT_AUTHORIZED",
+                    "message": "当前用户消息未明确授权使用团队或多智能体分析。",
+                },
+                ensure_ascii=False,
+            )
+
         prompt = kwargs.get("prompt", "")
 
         if not prompt:
@@ -813,10 +834,32 @@ class SwarmTool(BaseTool):
             )
 
         explicit_preset = kwargs.get("preset_name")
-        fx_decision = route_fx_prompt(
-            prompt,
-            explicit_preset=explicit_preset if isinstance(explicit_preset, str) else None,
-        )
+        if self._swarm_authorization is None:
+            fx_decision = route_fx_prompt(
+                prompt,
+                explicit_preset=explicit_preset if isinstance(explicit_preset, str) else None,
+            )
+        else:
+            prompt = self._swarm_authorization.raw_user_content
+            fx_decision = self._swarm_authorization.fx_decision
+            if fx_decision is None:
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "terminal": True,
+                        "retryable": False,
+                        "code": "SWARM_AUTHORIZATION_INVALID",
+                        "message": "当前请求缺少可审计的团队路由决策。",
+                    },
+                    ensure_ascii=False,
+                )
+            if (
+                isinstance(explicit_preset, str)
+                and explicit_preset.strip().lower().replace("-", "_").replace(" ", "_")
+                in FX_DEBATE_PRESET_ALIASES
+                and fx_decision.route != "fx_debate"
+            ):
+                explicit_preset = None
         if fx_decision.route == "clarify":
             return _format_fx_route_error(fx_decision)
         if fx_decision.route == "fx_debate":
