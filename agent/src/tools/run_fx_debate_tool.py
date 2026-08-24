@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -42,6 +43,9 @@ from src.fx_debate.request_adapter import (
 from src.fx_debate.store import FxEvidenceStore
 from src.market_data_reader import MarketDataReader
 from src.tools.validate_fx_output_tool import ValidateFxOutputTool
+
+if TYPE_CHECKING:
+    from src.agent.swarm_authorization import SwarmAuthorization
 
 _JSON_FENCE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
@@ -321,12 +325,14 @@ class RunFxDebateTool(BaseTool):
         evidence_source: FxEvidenceSource | None = None,
         evidence_factory: FxEvidenceFactory | None = None,
         cancel_checker: CancelChecker | None = None,
+        swarm_authorization: "SwarmAuthorization | None" = None,
     ) -> None:
-        self._orchestrator = orchestrator or DefaultFxDebateOrchestrator()
+        self._orchestrator = orchestrator
         self._event_callback = event_callback
         self._evidence_source = evidence_source
-        self._evidence_factory = evidence_factory or FxEvidenceFactory()
+        self._evidence_factory = evidence_factory
         self._cancel_checker = cancel_checker
+        self._swarm_authorization = swarm_authorization
 
     @classmethod
     def check_available(cls) -> bool:
@@ -357,6 +363,32 @@ class RunFxDebateTool(BaseTool):
 
     def execute(self, **kwargs: Any) -> str:
         """Validate Planner input, run the DAG, and deliver the safest usable report."""
+        if self._swarm_authorization is not None:
+            if not self._swarm_authorization.authorized:
+                return _error(
+                    "SWARM_NOT_AUTHORIZED",
+                    "当前用户消息未明确授权使用团队或多智能体分析。",
+                )
+            if (
+                self._swarm_authorization.fx_decision is None
+                or self._swarm_authorization.fx_decision.route != "fx_debate"
+                or self._swarm_authorization.fx_decision.request is None
+            ):
+                return _error(
+                    "FX_DEBATE_NOT_AUTHORIZED_FOR_REQUEST",
+                    "当前原始用户消息未授权进入 FX Debate。",
+                )
+
+            request = self._swarm_authorization.fx_decision.request
+            run_options = kwargs.get("run_options")
+            kwargs = {
+                "target": request.target,
+                "timeframe": request.timeframe,
+                "goal": request.goal,
+            }
+            if run_options is not None:
+                kwargs["run_options"] = run_options
+
         try:
             trace_events: list[dict[str, Any]] = []
 
@@ -407,7 +439,8 @@ class RunFxDebateTool(BaseTool):
             source = self._evidence_source or _configured_evidence_source(
                 trace_callback=emit_trace
             )
-            bundle = self._evidence_factory.build(context, source)
+            evidence_factory = self._evidence_factory or FxEvidenceFactory()
+            bundle = evidence_factory.build(context, source)
             if self._cancel_checker is not None and self._cancel_checker():
                 return _error("FX_DEBATE_CANCELLED", "FX Debate 已由用户停止。")
             data_preview = build_evidence_preview(bundle)
@@ -430,15 +463,16 @@ class RunFxDebateTool(BaseTool):
                 "context": context,
                 "bundle": bundle,
             }
+            orchestrator = self._orchestrator or DefaultFxDebateOrchestrator()
             if self._event_callback is None and self._cancel_checker is None:
-                execution = self._orchestrator.run(**orchestration_args)
+                execution = orchestrator.run(**orchestration_args)
             else:
                 optional_args: dict[str, Any] = {}
                 if self._event_callback is not None:
                     optional_args["event_callback"] = emit_trace
                 if self._cancel_checker is not None:
                     optional_args["cancel_checker"] = self._cancel_checker
-                execution = self._orchestrator.run(
+                execution = orchestrator.run(
                     **orchestration_args,
                     **optional_args,
                 )

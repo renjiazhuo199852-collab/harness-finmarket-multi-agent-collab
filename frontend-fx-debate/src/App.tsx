@@ -10,6 +10,7 @@ import { MarkdownContent } from "@/components/MarkdownContent";
 import { SettingsView } from "@/components/SettingsView";
 import { buildReportDownloadMarkdown, displayReportMarkdown, downloadTextFile, localizeReportMarkdown, sanitizeReportDisplayText } from "@/lib/report";
 import { SessionTransport, type SSEStatus } from "@/lib/sse";
+import { nextStreamingIdentity, streamingIdentityCopy, type StreamingIdentity } from "@/lib/streaming_identity";
 import { buildResearchProgress, dependencyAwareAgentStatus, stageAwareAgentStatus, type ProgressStageStatus, type ResearchProgressStage } from "@/lib/progress";
 import { activeSnapshot, applyRunEvent, emptyRunWorkspace, hydrateReportsFromMessages, hydrateRunSnapshot, markActiveRunCancelled, needsRunHydration, replaceRunSummaries, runIdFromEvent, selectRun as selectRunState } from "@/lib/run_workspace";
 import { isRunActive, settleCancellation } from "@/lib/run_controls";
@@ -250,6 +251,7 @@ function EmptyState({ title, detail }: { title: string; detail: string }): React
 function ChatView({
   messages,
   streamingText,
+  streamingIdentity,
   reasoning,
   workspace,
   onView,
@@ -257,6 +259,7 @@ function ChatView({
 }: {
   messages: MessageItem[];
   streamingText: string;
+  streamingIdentity: StreamingIdentity;
   reasoning: boolean;
   workspace: WorkspaceSnapshot;
   onView: (view: WorkspaceView) => void;
@@ -264,6 +267,7 @@ function ChatView({
 }): ReactElement {
   const hasSwarm = Boolean(workspace.runId);
   const progress = buildResearchProgress(workspace);
+  const streamingCopy = streamingIdentityCopy(streamingIdentity);
   return <div className="chat-layout">
     <div className="message-list">
       {messages.length === 0 && !streamingText && <div className="welcome">
@@ -284,7 +288,7 @@ function ChatView({
           : message.content}</div>
       </article>)}
       {streamingText && <article className="message message-assistant streaming-message">
-        <div className="message-meta"><span>FX Debate</span><span className="live-dot">● 实时</span></div>
+        <div className="message-meta"><span>{streamingCopy.name}</span><span className="live-dot">{streamingCopy.status}</span></div>
         <div className="message-body"><MarkdownContent>{streamingText}</MarkdownContent></div>
       </article>}
       {reasoning && !streamingText && <div className="reasoning"><Activity size={14} /> Agent 正在整理证据和协作结果…</div>}
@@ -848,6 +852,7 @@ export default function App(): ReactElement {
   const [runWorkspace, setRunWorkspace] = useState(() => emptyRunWorkspace());
   const [draft, setDraft] = useState("");
   const [streamingText, setStreamingText] = useState("");
+  const [streamingIdentity, setStreamingIdentity] = useState<StreamingIdentity>("research-assistant");
   const [reasoning, setReasoning] = useState(false);
   const [, setSseStatus] = useState<SSEStatus>("disconnected");
   const [backendConnectionStatus, setBackendConnectionStatus] = useState<BackendConnectionStatus>("checking");
@@ -884,6 +889,7 @@ export default function App(): ReactElement {
 
   const consume = useCallback((event: SessionEvent) => {
     const eventAttemptId = typeof event.data.attempt_id === "string" ? event.data.attempt_id : undefined;
+    setStreamingIdentity((current) => nextStreamingIdentity(current, event));
     if (event.type === "text_delta") {
       setStreamingText((value) => value + String(event.data.delta || ""));
       setReasoning(false);
@@ -980,6 +986,7 @@ export default function App(): ReactElement {
     setRunWorkspace(emptyRunWorkspace());
     setDraft("");
     setStreamingText("");
+    setStreamingIdentity("research-assistant");
     setReasoning(false);
     setBusy(false);
     setCancelling(false);
@@ -1000,6 +1007,7 @@ export default function App(): ReactElement {
   const openSession = useCallback((id: string) => {
     setError("");
     setActiveView("chat");
+    setStreamingIdentity("research-assistant");
     setSessionId(id);
     updateUrl({ session: id, run: undefined, view: "chat" });
   }, []);
@@ -1066,6 +1074,7 @@ export default function App(): ReactElement {
     setError("");
     setDraft("");
     setStreamingText("");
+    setStreamingIdentity("research-assistant");
     setReasoning(false);
     setBusy(true);
     setCancelling(false);
@@ -1102,7 +1111,7 @@ export default function App(): ReactElement {
       <main className="main-content">
       {error && <div className="error-banner"><AlertCircle size={16} />{error}<button onClick={() => setError("")} title="关闭"><XCircle size={15} /></button></div>}
       <RunSwitcher summaries={runWorkspace.summaries} activeRunId={runWorkspace.activeRunId} onSelect={selectRun} />
-      {activeView === "chat" && <ChatView messages={messages} streamingText={streamingText} reasoning={reasoning} workspace={workspace} onView={setView} onSelectAgent={setSelected} />}
+      {activeView === "chat" && <ChatView messages={messages} streamingText={streamingText} streamingIdentity={streamingIdentity} reasoning={reasoning} workspace={workspace} onView={setView} onSelectAgent={setSelected} />}
       {activeView === "swarm" && <SwarmCatalogView />}
       {activeView === "canvas" && <CanvasView workspace={workspace} onSelect={setSelected} selectedAgentId={selected && "role" in selected ? selected.id : undefined} />}
       {activeView === "data" && <DataView workspace={workspace} />}
