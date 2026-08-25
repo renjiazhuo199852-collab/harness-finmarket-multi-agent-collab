@@ -15,6 +15,7 @@
   前三者并行研究，随后执行风险复核和交易经理综合判断。
 - `run_fx_debate` 在 Agent 启动前创建本次运行专属 Evidence Context/Bundle；行情、宏观、新闻和技术证据通过受控 Tool 回查，最终报告经过确定性结构和风险校验。
 - FX 数据统一通过独立 AI Search 服务获取，不在 Agent 侧切换或静默回退到其他数据源。
+- Swarm 授权只来自当前轮原始用户消息；只有明确提到“团队”“多智能体”“辩论”“FX Debate”或“Swarm”时，Planner 才能看到团队工具。授权只开放工具，实际启动点仍是 Planner/LLM 的 tool call。
 - 前端设置页支持通用 OpenAI-compatible 供应商、模型、后端地址和数据服务地址配置，并可从浏览器直接测试后端和供应商的 `/models` 接口。
 - 增加数据稳健性约束：报价时效、4H 数据完整性、证据缺失和异常状态会进入结果质量，而不会被前端补造成“新鲜行情”。本系统只生成研究建议，不执行下单。
 
@@ -25,7 +26,7 @@
 
 | 能力 | Vibe Trading 基础能力 | 本项目新增或扩展 |
 | --- | --- | --- |
-| 用户问题路由 | 通用 Agent 根据问题选择工具或 Swarm | 确定性 FX Router，先识别货币对、期限和周期，再决定进入 `fx_debate_team`、通用路由或澄清 |
+| 用户问题路由 | 通用 Agent 根据问题选择工具或 Swarm | 当前轮显式团队授权门禁，再由确定性 FX Router 识别货币对、期限和周期，决定进入 `fx_debate_team`、通用路由或澄清 |
 | Swarm | 通用 preset 和 worker 调度 | 固定五角色 FX Debate DAG：多头、空头、宏观技术、交易经理和风险官 |
 | 数据使用 | 可使用已有行情工具和数据源 | 运行前创建独立 Evidence Context，数据先冻结成 Evidence Bundle，再允许 Agent 按 evidence id 回查 |
 | 数据检索 | 工具调用通常由 Agent 直接组织参数 | 新增独立 AI Search 服务和 `FxDataQueryAgent`，将自然语言查询转换为受控数据服务请求 |
@@ -368,9 +369,19 @@ npm run dev
 
 推荐流程：先进入“设置”页测试后端连接和模型接口，再进入“对话”页发送：
 
+下面的示例明确授权使用团队；关键词只允许 Planner 使用团队工具，不会绕过 AgentLoop 直接启动 Swarm：
+
 ```text
-分析 EURUSD 未来两周走势，结合 4H 和 1D 周期，给出平衡风险偏好的交易建议，并明确入场、止损、止盈和失效条件。
+请让 FX Debate 团队分析 EURUSD 未来两周走势，结合 4H 和 1D 周期，给出平衡风险偏好的交易建议，并明确入场、止损、止盈和失效条件。
 ```
+
+如果输入不含团队授权词，例如：
+
+```text
+分析 EURUSD 未来两周走势。
+```
+
+本轮会保持普通研究助手路径，前端流式状态显示“研究助手 ● 正在生成”，不会仅因识别到 EURUSD 就启动 FX Debate。
 
 运行过程中可以切换到“协作画布”查看实际任务依赖，切换到“流程日志”查看 Agent、Tool、
 AI Search 和证据事件，运行完成后在“最终报告”查看结构化结论。Session、run 和 view 会写入
@@ -426,6 +437,12 @@ curl -s -X POST http://127.0.0.1:8011/tools/unified_search \
 ```
 
 ## 常见问题
+
+**普通 EURUSD 请求为什么没有启动 FX Debate**
+
+这是当前路由门禁的预期行为。请在当前消息中明确写出“团队”“多智能体”“辩论”“FX Debate”或“Swarm”。授权不会从历史消息、LLM 生成的 prompt、tool arguments 或 preset 继承。即使已授权，Planner 仍需实际调用 `run_swarm` 或 `run_fx_debate`；执行入口会再次校验当前轮授权。
+
+数据库和 AI Search 是否可用只影响授权后的 Evidence 与 Debate 执行，不会替代当前轮团队授权，也不会把普通请求自动升级为 Swarm。
 
 **对话返回 HTTP 500**
 
