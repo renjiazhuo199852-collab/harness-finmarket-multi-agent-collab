@@ -129,6 +129,20 @@ def test_model_candidate_accepts_structured_skill_override_as_serialized_content
     }
 
 
+def test_extract_json_accepts_fenced_json_with_intro_text() -> None:
+    payload = customization.AgentCustomizationService._extract_json(
+        "修改方案如下：\n```json\n{\"system_prompt\": \"新的中文提示\", \"skills\": [], \"skill_overrides\": {}}\n```\n以上。"
+    )
+    assert payload["system_prompt"] == "新的中文提示"
+
+
+def test_extract_json_accepts_json_object_embedded_in_model_prose() -> None:
+    payload = customization.AgentCustomizationService._extract_json(
+        "我已完成审核。{\"approved\": true, \"risk_level\": \"low\", \"findings\": [], \"checks\": []}"
+    )
+    assert payload["approved"] is True
+
+
 def test_model_review_accepts_structured_findings_and_checks(
     service: customization.AgentCustomizationService,
     monkeypatch: pytest.MonkeyPatch,

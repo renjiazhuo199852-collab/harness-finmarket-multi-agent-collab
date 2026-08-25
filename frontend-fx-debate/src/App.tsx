@@ -560,11 +560,49 @@ function AgentCatalogCard({ entry, onOpen, onEdit }: { entry: AgentCatalogEntry;
   </article>;
 }
 
-function SwarmCatalogView(): ReactElement {
+function DirectRunDialog({ preset, onClose, onStarted }: { preset: SwarmPresetDetail; onClose: () => void; onStarted: (runId: string) => void }): ReactElement {
+  const [target, setTarget] = useState("EURUSD");
+  const [timeframe, setTimeframe] = useState("2 weeks; 4H/1D");
+  const [goal, setGoal] = useState("分析 EURUSD 未来两周走势，给出平衡风险偏好的交易建议。");
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState("");
+
+  const start = async () => {
+    if (!target.trim() || !timeframe.trim() || !goal.trim()) return;
+    setStarting(true);
+    setError("");
+    try {
+      const result = await api.createSwarmRun(preset.name, {
+        target: target.trim(),
+        timeframe: timeframe.trim(),
+        goal: goal.trim(),
+      });
+      onStarted(result.id);
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : "启动运行失败");
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return <div className="direct-run-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="direct-run-modal" role="dialog" aria-modal="true" aria-labelledby="direct-run-title">
+      <div className="direct-run-header"><div><span className="eyebrow">DIRECT RUN</span><h3 id="direct-run-title">启动智能体运行</h3><p>{preset.title || preset.name} · {preset.agents.length} 个智能体将按预设流程执行</p></div><button className="icon-button" onClick={onClose} title="关闭"><XCircle size={17} /></button></div>
+      <label>研究对象<input value={target} onChange={(event) => setTarget(event.target.value)} placeholder="例如 EURUSD" /></label>
+      <label>研究期限与周期<input value={timeframe} onChange={(event) => setTimeframe(event.target.value)} placeholder="例如 未来两周，结合 1D" /></label>
+      <label>研究目标<textarea value={goal} onChange={(event) => setGoal(event.target.value)} rows={4} placeholder="输入希望智能体团队完成的研究任务" /></label>
+      {error ? <div className="error-banner"><AlertCircle size={15} />{error}</div> : null}
+      <div className="direct-run-footer"><span>启动后将进入协作画布，可实时查看任务和 Agent 状态。</span><div><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={starting || !target.trim() || !timeframe.trim() || !goal.trim()} onClick={() => void start()}><Send size={15} />{starting ? "启动中..." : "启动运行"}</button></div></div>
+    </section>
+  </div>;
+}
+
+function SwarmCatalogView({ onStarted }: { onStarted: (runId: string) => void }): ReactElement {
   const [presets, setPresets] = useState<SwarmPresetSummary[]>([]);
   const [details, setDetails] = useState<Record<string, SwarmPresetDetail>>({});
   const [selectedName, setSelectedName] = useState(() => new URLSearchParams(window.location.search).get("preset") || "");
   const [editorAgentId, setEditorAgentId] = useState("");
+  const [runPreset, setRunPreset] = useState<SwarmPresetDetail | null>(null);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<AgentTeamCategory>("全部");
   const [agentQuery, setAgentQuery] = useState("");
@@ -680,7 +718,7 @@ function SwarmCatalogView(): ReactElement {
     return <>
     <div className="workspace-view swarm-view">
       <button className="text-button swarm-back" onClick={closeDetail}>返回智能体中心</button>
-      <div className="view-heading"><div><span className="eyebrow">团队详情</span><h2>{display.title}</h2><code className="preset-id-line">{selected.name}</code><p>{display.description}</p></div>{display.isCore ? <div className="context-tags"><span>{display.badge}</span></div> : null}</div>
+      <div className="view-heading"><div><span className="eyebrow">团队详情</span><h2>{display.title}</h2><code className="preset-id-line">{selected.name}</code><p>{display.description}</p></div><div className="swarm-detail-actions">{display.isCore ? <div className="context-tags"><span>{display.badge}</span></div> : null}<button className="primary-button" onClick={() => setRunPreset(selected)}><Send size={15} />启动运行</button></div></div>
       <div className="swarm-metrics"><div><span>智能体</span><strong>{selected.agents.length}</strong></div><div><span>任务</span><strong>{selected.tasks.length}</strong></div><div><span>工具</span><strong>{tools.length}</strong></div><div><span>技能</span><strong>{skills.length}</strong></div></div>
       <section className="swarm-section"><div className="section-heading"><h3>协作流程</h3><span>{hasWorkflow ? "依据预设工作流生成" : "未配置工作流依赖"}</span></div>{hasWorkflow ? <div className="swarm-workflow" style={{ gridTemplateColumns: selected.layers.flatMap((_layer, index) => index === selected.layers.length - 1 ? ["minmax(0, 1fr)"] : ["minmax(0, 1fr)", "38px"]).join(" ") }}>{selected.layers.map((layer, index) => <Fragment key={index}><div className="swarm-layer"><small>第 {index + 1} 阶段</small><div className="swarm-layer-body">{layer.map((node) => {
         const task = selected.tasks.find((item) => item.id === node.task_id);
@@ -695,6 +733,7 @@ function SwarmCatalogView(): ReactElement {
       {selected.warnings && selected.warnings.length > 0 ? <section className="swarm-section"><div className="section-heading"><h3>预设检查提示</h3><span>{selected.warnings.length} 条</span></div><SwarmChipList items={selected.warnings} emptyText="无提示" /></section> : null}
     </div>
     {editorAgent ? <AgentEditorPanel presetName={selected.name} agent={editorAgent} displayName={agentRoleLabel(selected.name, editorAgent)} onClose={() => setEditorAgentId("")} onChanged={refreshSelectedDetail} /> : null}
+    {runPreset ? <DirectRunDialog preset={runPreset} onClose={() => setRunPreset(null)} onStarted={(runId) => { setRunPreset(null); onStarted(runId); }} /> : null}
     </>;
   }
 
@@ -905,6 +944,7 @@ export default function App(): ReactElement {
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [theme, setTheme] = useState<"light" | "dark">(() => (localStorage.getItem("fx-debate-theme") as "light" | "dark") || "light");
   const [selected, setSelected] = useState<AgentSnapshot | WorkspaceEvent | null>(null);
+  const [directRunId, setDirectRunId] = useState("");
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1090,6 +1130,18 @@ export default function App(): ReactElement {
 
   const workspace = activeSnapshot(runWorkspace);
   const runActive = isRunActive(busy, workspace.status);
+  useEffect(() => {
+    if (!directRunId || workspace.runId !== directRunId || !["pending", "running"].includes(workspace.status)) return undefined;
+    let active = true;
+    const refresh = () => {
+      void api.getSwarmRun(directRunId).then((run) => {
+        if (active) setRunWorkspace((current) => hydrateRunSnapshot(current, run as unknown as Record<string, unknown>));
+      }).catch(() => undefined);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 2000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [directRunId, workspace.runId, workspace.status]);
   const updateVisibleReport = useCallback((markdown: string) => {
     setRunWorkspace((current) => {
       const snapshot = activeSnapshot(current);
@@ -1168,7 +1220,14 @@ export default function App(): ReactElement {
       {error && <div className="error-banner"><AlertCircle size={16} />{error}<button onClick={() => setError("")} title="关闭"><XCircle size={15} /></button></div>}
       <RunSwitcher summaries={runWorkspace.summaries} activeRunId={runWorkspace.activeRunId} onSelect={selectRun} />
       {activeView === "chat" && <ChatView messages={messages} streamingText={streamingText} streamingIdentity={streamingIdentity} reasoning={reasoning} workspace={workspace} onView={setView} onSelectAgent={setSelected} />}
-      {activeView === "swarm" && <SwarmCatalogView />}
+      {activeView === "swarm" && <SwarmCatalogView onStarted={(runId) => {
+        setDirectRunId(runId);
+        setSessionId("");
+        setMessages([]);
+        updateUrl({ session: undefined, run: runId, view: "canvas" });
+        setActiveView("canvas");
+        void api.getSwarmRun(runId).then((run) => setRunWorkspace((current) => hydrateRunSnapshot(current, run as unknown as Record<string, unknown>))).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "无法加载新运行"));
+      }} />}
       {activeView === "canvas" && <CanvasView workspace={workspace} onSelect={setSelected} selectedAgentId={selected && "role" in selected ? selected.id : undefined} />}
       {activeView === "data" && <DataView workspace={workspace} />}
       {activeView === "logs" && <LogsView events={workspace.events} runStatus={workspace.status} onSelect={setSelected} />}

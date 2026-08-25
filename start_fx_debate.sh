@@ -35,6 +35,7 @@ API_STARTUP_ATTEMPTS="${API_STARTUP_ATTEMPTS:-180}"
 FRONTEND_STARTUP_ATTEMPTS="${FRONTEND_STARTUP_ATTEMPTS:-60}"
 MCP_PREFLIGHT_TIMEOUT_SECONDS="${MCP_PREFLIGHT_TIMEOUT_SECONDS:-60}"
 MCP_REQUIRED="${MCP_REQUIRED:-1}"
+MCP_SMOKE_QUERY="${MCP_SMOKE_QUERY:-查询 EURUSD 最近一个月的日线行情}"
 
 SSH_ENABLED="${SSH_ENABLED:-1}"
 SSH_USER="${SSH_USER:-root}"
@@ -68,6 +69,7 @@ usage() {
   SSH_HOST=101.35.55.7     SSH 主机
   SSH_ENABLED=0            跳过 SSH 隧道
   MCP_PREFLIGHT_TIMEOUT_SECONDS=60  MCP 启动握手和数据烟测超时（秒）
+  MCP_SMOKE_QUERY=...       MCP 启动烟测查询（默认：EURUSD 最近一个月日线行情）
   MCP_REQUIRED=0             允许回退到 Excel/其他数据源（默认 1，强制 MCP）
   START_AI_SEARCH_FRONTEND=1  同时启动 AI Search 调试前端（默认关闭）
 EOF
@@ -276,7 +278,7 @@ preflight_mcp() {
     --directory "$AI_SEARCH_DIR" \
     --server-module "backend.mcp_server" \
     --timeout "$MCP_PREFLIGHT_TIMEOUT_SECONDS" \
-    --smoke-query "查询 EURUSD 最新汇率" \
+    --smoke-query "$MCP_SMOKE_QUERY" \
     > "$preflight_log" 2>&1; then
     cat "$preflight_log"
     echo "MCP 已就绪：unified_search（查询时由 FX API 按需创建短会话）"

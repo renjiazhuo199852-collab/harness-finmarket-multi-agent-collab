@@ -193,6 +193,11 @@ export const api = {
         : null,
     } satisfies SwarmRunDetail;
   },
+  createSwarmRun: (presetName: string, userVars: Record<string, string>) =>
+    request<{ id: string; status: string; preset_name: string }>("/swarm/runs", {
+      method: "POST",
+      body: JSON.stringify({ preset_name: presetName, user_vars: userVars }),
+    }),
   updateSwarmReport: (id: string, markdown: string) =>
     request<{ id: string; final_report: string; updated: boolean }>(`/swarm/runs/${encodeURIComponent(id)}/report`, {
       method: "PUT",

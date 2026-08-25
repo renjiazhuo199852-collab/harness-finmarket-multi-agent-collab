@@ -10,6 +10,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -356,17 +357,35 @@ class AgentCustomizationService:
     @staticmethod
     def _extract_json(content: str) -> dict[str, Any]:
         text = (content or "").strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text
-            if text.endswith("```"):
-                text = text[:-3]
-        try:
-            value = json.loads(text.strip())
-        except json.JSONDecodeError as exc:
-            raise CustomizationError("model returned invalid JSON") from exc
-        if not isinstance(value, dict):
-            raise CustomizationError("model returned a non-object proposal")
-        return value
+        decoder = json.JSONDecoder()
+
+        # Providers occasionally add a short explanation or wrap the payload
+        # in a Markdown code fence despite the JSON-only instruction. Accept
+        # those transport decorations while keeping the decoded value strict.
+        candidates = [text]
+        candidates.extend(match.group(1).strip() for match in re.finditer(r"```(?:json)?\s*\n?(.*?)```", text, re.IGNORECASE | re.DOTALL))
+        for candidate in candidates:
+            try:
+                value = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+
+        # Decode the first complete object embedded in prose. raw_decode is
+        # deliberately used instead of regex balancing so braces inside JSON
+        # strings remain valid.
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                value, _end = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+
+        raise CustomizationError("model returned invalid JSON")
 
     def _call_model(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         from src.providers.chat import ChatLLM
