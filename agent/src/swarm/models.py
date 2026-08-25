@@ -80,6 +80,8 @@ class SwarmAgentSpec(BaseModel):
     system_prompt: str
     tools: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
+    skill_overrides: dict[str, str] = Field(default_factory=dict)
+    config_revision: str | None = None
     max_iterations: int = 25
     timeout_seconds: int = 300
     model_name: str | None = None

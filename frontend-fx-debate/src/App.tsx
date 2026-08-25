@@ -3,10 +3,11 @@ import type { ReactElement } from "react";
 import {
   Activity, AlertCircle, ArrowUpRight, CheckCircle2, ChevronRight, CircleDot, Database,
   Download, FileText, History, ListTree, MessageSquare, Moon, Network, PanelLeft, PanelLeftClose,
-  Plus, RefreshCw, Search, Send, Server, Settings, Square, Sun, Trash2, XCircle,
+  Pencil, Plus, RefreshCw, Save, Search, Send, Server, Settings, Square, Sun, Trash2, XCircle,
 } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
 import { MarkdownContent } from "@/components/MarkdownContent";
+import { AgentEditorPanel } from "@/components/AgentEditorPanel";
 import { SettingsView } from "@/components/SettingsView";
 import { buildReportDownloadMarkdown, displayReportMarkdown, downloadTextFile, localizeReportMarkdown, sanitizeReportDisplayText } from "@/lib/report";
 import { SessionTransport, type SSEStatus } from "@/lib/sse";
@@ -540,14 +541,14 @@ function AgentCatalogChips({ items, limit }: { items: string[]; limit: number })
   return <div className="agent-catalog-chips">{preview.visible.length ? preview.visible.map((item) => <span title={item} key={item}>{item}</span>) : <em>未显式配置</em>}{preview.remaining > 0 ? <span>+{preview.remaining}</span> : null}</div>;
 }
 
-function AgentCatalogCard({ entry, onOpen }: { entry: AgentCatalogEntry; onOpen: () => void }): ReactElement {
+function AgentCatalogCard({ entry, onOpen, onEdit }: { entry: AgentCatalogEntry; onOpen: () => void; onEdit: (presetName: string, agentId: string) => void }): ReactElement {
   const display = presetDisplay(entry.preset);
   const tools = entry.agent.tools || [];
   const skills = entry.agent.skills || [];
   const toolRow = <div className="agent-catalog-capability"><span>可调用工具</span><AgentCatalogChips items={tools} limit={4} /></div>;
   const skillRow = <div className="agent-catalog-capability"><span>专业技能</span><AgentCatalogChips items={skills} limit={3} /></div>;
   return <article className="agent-catalog-card">
-    <div className="agent-catalog-card-head"><div className="agent-catalog-title"><strong>{agentRoleLabel(entry.preset.name, entry.agent)}</strong><span>{entry.agent.id}</span></div>{display.isCore ? <span className="team-badge team-badge-core">项目核心</span> : null}</div>
+    <div className="agent-catalog-card-head"><div className="agent-catalog-title"><strong>{agentRoleLabel(entry.preset.name, entry.agent)}</strong><span>{entry.agent.id}</span></div><div className="agent-catalog-card-actions">{display.isCore ? <span className="team-badge team-badge-core">项目核心</span> : null}<button className="icon-button" title="编辑智能体配置" onClick={() => onEdit(entry.preset.name, entry.agent.id)}><Settings size={15} /></button></div></div>
     <div className="agent-catalog-responsibility"><span>主要职责</span><p>{agentResponsibility(entry.preset.name, entry.agent)}</p></div>
     <div className="agent-catalog-team"><span>所属团队</span><strong>{display.title}</strong></div>
     {display.isCore ? <>{skillRow}{toolRow}</> : <>{toolRow}{skillRow}</>}
@@ -559,6 +560,7 @@ function SwarmCatalogView(): ReactElement {
   const [presets, setPresets] = useState<SwarmPresetSummary[]>([]);
   const [details, setDetails] = useState<Record<string, SwarmPresetDetail>>({});
   const [selectedName, setSelectedName] = useState(() => new URLSearchParams(window.location.search).get("preset") || "");
+  const [editorAgentId, setEditorAgentId] = useState("");
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<AgentTeamCategory>("全部");
   const [agentQuery, setAgentQuery] = useState("");
@@ -593,9 +595,16 @@ function SwarmCatalogView(): ReactElement {
 
   const openPreset = (name: string) => {
     setSelectedName(name);
+    setEditorAgentId("");
     updateUrl({ view: "swarm", preset: name });
   };
+  const openAgentEditor = (presetName: string, agentId: string) => {
+    setSelectedName(presetName);
+    setEditorAgentId(agentId);
+    updateUrl({ view: "swarm", preset: presetName });
+  };
   const closeDetail = () => {
+    setEditorAgentId("");
     setSelectedName("");
     updateUrl({ view: "swarm", preset: undefined });
   };
@@ -660,7 +669,12 @@ function SwarmCatalogView(): ReactElement {
     const tools = uniqueAgentValues(selected, "tools");
     const skills = uniqueAgentValues(selected, "skills");
     const hasWorkflow = selected.layers.length > 1 || selected.tasks.some((task) => task.depends_on.length > 0);
-    return <div className="workspace-view swarm-view">
+    const editorAgent = selected.agents.find((item) => item.id === editorAgentId);
+    const refreshSelectedDetail = () => {
+      void api.getPreset(selected.name).then((next) => setDetails((current) => ({ ...current, [next.name]: next })));
+    };
+    return <>
+    <div className="workspace-view swarm-view">
       <button className="text-button swarm-back" onClick={closeDetail}>返回智能体中心</button>
       <div className="view-heading"><div><span className="eyebrow">团队详情</span><h2>{display.title}</h2><code className="preset-id-line">{selected.name}</code><p>{display.description}</p></div>{display.isCore ? <div className="context-tags"><span>{display.badge}</span></div> : null}</div>
       <div className="swarm-metrics"><div><span>智能体</span><strong>{selected.agents.length}</strong></div><div><span>任务</span><strong>{selected.tasks.length}</strong></div><div><span>工具</span><strong>{tools.length}</strong></div><div><span>技能</span><strong>{skills.length}</strong></div></div>
@@ -671,11 +685,13 @@ function SwarmCatalogView(): ReactElement {
       })}</div></div>{index < selected.layers.length - 1 ? <div className="swarm-workflow-connector" aria-hidden="true"><div><i /><ChevronRight size={14} /></div></div> : null}</Fragment>)}</div> : <p className="detail-muted">该团队的任务没有依赖信息，页面不生成推测流程图。</p>}</section>
       <section className="swarm-section"><div className="section-heading"><h3>智能体与职责</h3><span>{selected.agents.length} 个智能体</span></div><div className="swarm-agent-grid">{selected.agents.map((agent) => {
         const task = taskForAgent(selected, agent);
-        return <article className="swarm-agent-card" key={agent.id}><div className="agent-card-top"><span className="agent-icon"><Activity size={16} /></span><div className="agent-card-title"><strong>{agentRoleLabel(selected.name, agent)}</strong><span>{agent.id}</span></div></div><div className="agent-responsibility"><span>主要职责</span><p>{agentResponsibility(selected.name, agent)}</p></div><div className="swarm-agent-meta"><span>负责任务</span><strong><b>{taskLabel(task)}</b>{task ? <code>{task.id}</code> : null}</strong><span>上游依赖</span><strong>{dependencyText(selected, task)}</strong></div>{display.isCore ? <><h4>专业技能</h4><SwarmChipList items={agent.skills || []} emptyText="未显式配置" /><h4>可调用工具</h4><SwarmChipList items={agent.tools || []} emptyText="未显式配置" /></> : <><h4>可调用工具</h4><SwarmChipList items={agent.tools || []} emptyText="未显式配置" /><h4>专业技能</h4><SwarmChipList items={agent.skills || []} emptyText="未显式配置" /></>}</article>;
+        return <article className="swarm-agent-card" key={agent.id}><div className="agent-card-top"><span className="agent-icon"><Activity size={16} /></span><div className="agent-card-title"><strong>{agentRoleLabel(selected.name, agent)}</strong><span>{agent.id}</span></div><button className="icon-button" title="编辑智能体配置" onClick={() => setEditorAgentId(agent.id)}><Settings size={15} /></button></div><div className="agent-responsibility"><span>主要职责</span><p>{agentResponsibility(selected.name, agent)}</p></div><div className="swarm-agent-meta"><span>负责任务</span><strong><b>{taskLabel(task)}</b>{task ? <code>{task.id}</code> : null}</strong><span>上游依赖</span><strong>{dependencyText(selected, task)}</strong></div>{display.isCore ? <><h4>专业技能</h4><SwarmChipList items={agent.skills || []} emptyText="未显式配置" /><h4>可调用工具</h4><SwarmChipList items={agent.tools || []} emptyText="未显式配置" /></> : <><h4>可调用工具</h4><SwarmChipList items={agent.tools || []} emptyText="未显式配置" /><h4>专业技能</h4><SwarmChipList items={agent.skills || []} emptyText="未显式配置" /></>}</article>;
       })}</div></section>
       <section className="swarm-section"><div className="section-heading"><h3>团队能力汇总</h3><span>{tools.length + skills.length} 项能力</span></div><div className="swarm-capability-summary"><div><h4>团队可用工具</h4><SwarmChipList items={tools} emptyText="未显式配置" /></div><div><h4>团队专业技能</h4><SwarmChipList items={skills} emptyText="未显式配置" /></div></div></section>
       {selected.warnings && selected.warnings.length > 0 ? <section className="swarm-section"><div className="section-heading"><h3>预设检查提示</h3><span>{selected.warnings.length} 条</span></div><SwarmChipList items={selected.warnings} emptyText="无提示" /></section> : null}
-    </div>;
+    </div>
+    {editorAgent ? <AgentEditorPanel presetName={selected.name} agent={editorAgent} displayName={agentRoleLabel(selected.name, editorAgent)} onClose={() => setEditorAgentId("")} onChanged={refreshSelectedDetail} /> : null}
+    </>;
   }
 
   return <div className="workspace-view swarm-view">
@@ -685,7 +701,7 @@ function SwarmCatalogView(): ReactElement {
     {loading ? <EmptyState title="正在读取智能体团队" detail="正在从后端预设元数据加载真实智能体、工具和技能信息。" /> : visible.length === 0 ? <EmptyState title="没有匹配的智能体团队" detail={presets.length === 0 ? "当前后端没有返回任何预设。" : "换一个关键词试试。"} /> : <>
       {coreTeams.length > 0 ? <section className="swarm-list-section"><div className="section-heading"><h3>项目核心团队</h3><span>{coreTeams.length} 个团队</span></div><div className="swarm-featured-grid">{coreTeams.map((preset) => renderPresetCard(preset, true))}</div></section> : null}
       <section className="swarm-list-section"><div className="section-heading"><h3>专业智能体团队</h3><span>{professionalTeams.length} 个团队</span></div><div className="swarm-category-row">{AGENT_TEAM_CATEGORIES.map((item) => <button key={item} className={category === item ? "filter-active" : ""} onClick={() => setCategory(item)}>{item}</button>)}</div>{professionalTeams.length === 0 ? <EmptyState title="没有匹配的智能体团队" detail="当前搜索词与分类组合下没有结果。" /> : <div className="swarm-grid">{professionalTeams.map((preset) => renderPresetCard(preset))}</div>}</section>
-      <section className="swarm-list-section agent-catalog-section"><div className="section-heading"><div><h3>专业智能体</h3><p>浏览各专业团队中的智能体角色、职责及可调用能力</p></div><span>共 {agentVisible.length} 个智能体</span></div><div className="agent-catalog-controls"><div className="swarm-search"><Search size={15} /><input value={agentQuery} onChange={(event) => setAgentQuery(event.target.value)} placeholder="搜索智能体、团队、工具或技能" /></div><div className="swarm-category-row">{agentCategories.map((item) => <button key={item} className={agentCategory === item ? "filter-active" : ""} onClick={() => setAgentCategory(item)}>{item}</button>)}</div></div>{loading ? <EmptyState title="正在加载智能体信息..." detail="正在读取正式团队的真实 preset metadata。" /> : agentVisible.length === 0 ? <EmptyState title="没有匹配的专业智能体" detail={agentCatalog.length === 0 ? "当前没有可展示的智能体 metadata。" : "换一个关键词或分类试试。"} /> : <div className="agent-catalog-grid">{agentVisible.map((entry) => <AgentCatalogCard key={entry.key} entry={entry} onOpen={() => openPreset(entry.preset.name)} />)}</div>}</section>
+      <section className="swarm-list-section agent-catalog-section"><div className="section-heading"><div><h3>专业智能体</h3><p>浏览各专业团队中的智能体角色、职责及可调用能力</p></div><span>共 {agentVisible.length} 个智能体</span></div><div className="agent-catalog-controls"><div className="swarm-search"><Search size={15} /><input value={agentQuery} onChange={(event) => setAgentQuery(event.target.value)} placeholder="搜索智能体、团队、工具或技能" /></div><div className="swarm-category-row">{agentCategories.map((item) => <button key={item} className={agentCategory === item ? "filter-active" : ""} onClick={() => setAgentCategory(item)}>{item}</button>)}</div></div>{loading ? <EmptyState title="正在加载智能体信息..." detail="正在读取正式团队的真实 preset metadata。" /> : agentVisible.length === 0 ? <EmptyState title="没有匹配的专业智能体" detail={agentCatalog.length === 0 ? "当前没有可展示的智能体 metadata。" : "换一个关键词或分类试试。"} /> : <div className="agent-catalog-grid">{agentVisible.map((entry) => <AgentCatalogCard key={entry.key} entry={entry} onOpen={() => openPreset(entry.preset.name)} onEdit={openAgentEditor} />)}</div>}</section>
     </>}
   </div>;
 }
@@ -725,29 +741,56 @@ function visibleReportLogic(items?: string[]): string[] {
   return (items || []).map(reportDisplayText).filter(Boolean);
 }
 
-function ReportView({ report, workspace }: { report?: WorkspaceSnapshot["report"]; workspace: WorkspaceSnapshot }): ReactElement {
+function FinalReportEditor({ runId, initialValue, onClose, onSaved }: { runId?: string; initialValue: string; onClose: () => void; onSaved: (markdown: string) => void }): ReactElement {
+  const [draft, setDraft] = useState(initialValue);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape" && !saving) onClose(); };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, saving]);
+  const save = async () => {
+    if (!runId || !draft.trim()) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.updateSwarmReport(runId, draft.trim());
+      onSaved(draft.trim());
+      onClose();
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : "保存终稿失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <div className="report-editor-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="report-editor-modal" role="dialog" aria-modal="true" aria-labelledby="report-editor-title" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="report-editor-header"><div><span className="eyebrow">FINAL REPORT</span><h3 id="report-editor-title">编辑终稿</h3><p>只修改辩论裁决全文；四个研究节点报告、数据限制与审计段落保留在页面中。</p></div><button className="icon-button" type="button" onClick={onClose} title="关闭编辑器"><XCircle size={17} /></button></div>
+      {error ? <div className="error-banner"><AlertCircle size={15} />{error}</div> : null}
+      <textarea className="report-editor-textarea" value={draft} onChange={(event) => setDraft(event.target.value)} aria-label="终稿内容" />
+      <div className="report-editor-footer"><span>保存后只影响本次运行的终稿显示。</span><div><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" disabled={saving || !runId || !draft.trim()} onClick={() => void save()}><Save size={15} />{saving ? "保存中..." : "保存终稿"}</button></div></div>
+    </section>
+  </div>;
+}
+
+function ReportView({ report, workspace, onSaved }: { report?: WorkspaceSnapshot["report"]; workspace: WorkspaceSnapshot; onSaved: (markdown: string) => void }): ReactElement {
+  const [editing, setEditing] = useState(false);
   if (!report) return <div className="workspace-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>最终结果由本次路由选中的实际处理链路生成。</p></div></div><EmptyState title="报告尚未生成" detail={workspace.status === "failed" ? workspace.lastError || "本次运行失败，请查看流程日志。" : "等待当前处理链路完成。"} /></div>;
   const agentReportItems = reportAgents(workspace);
   const downloadContent = buildReportDownloadMarkdown(report, agentReportItems, workspace.variables.target || workspace.variables.symbol);
   const localizedMarkdown = report.markdown ? sanitizeReportDisplayText(localizeReportMarkdown(displayReportMarkdown(report.markdown))) : undefined;
   const downloadName = `${(workspace.variables.target || workspace.variables.symbol || "fx-debate").replace(/[^a-zA-Z0-9_-]+/g, "-")}-研究报告-${new Date().toISOString().slice(0, 10)}.md`;
   const presentation = report.presentation;
-  const background = presentation?.marketBackground || report.direction || "宏观背景无法确定";
-  const rawTechnicalConfirmation = presentation?.technicalConfirmation;
-  const technicalConfirmation = presentation?.dataQuality === "degraded" ? "未形成技术交易信号" : reportDisplayText(rawTechnicalConfirmation || "未提供技术确认信息");
-  const backgroundStrength = presentation?.backgroundStrength === "low" ? "低" : presentation?.backgroundStrength === "medium" ? "中" : presentation?.backgroundStrength === "high" ? "高" : presentation?.backgroundStrength || "未提供";
-  const numericConfidence = report.confidence === undefined ? undefined : Number(report.confidence);
-  const confidence = typeof numericConfidence === "number" && Number.isFinite(numericConfidence) && presentation?.dataQuality === "degraded"
-    ? Math.min(numericConfidence, 0.35)
-    : report.confidence;
   const unavailablePriceText = "不适用";
   const rationale = visibleReportLogic([...(presentation?.usableEvidence || []), ...(report.rationale || [])]);
   const invalidation = visibleReportLogic(report.invalidation);
   const risks = visibleReportLogic(report.risks);
   return <div className="workspace-view report-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>完整呈现裁决、研究节点、数据限制与审计逻辑。</p></div><StatusPill status={workspace.status} /></div>
-    <div className="report-actions"><button className="text-button report-download-button" type="button" onClick={() => downloadTextFile(downloadContent, downloadName)} title="下载完整报告"><Download size={15} />下载完整报告</button></div>
+    <div className="report-actions"><button className="text-button report-download-button" type="button" onClick={() => setEditing(true)} disabled={!localizedMarkdown || !workspace.runId} title="编辑终稿"><Pencil size={15} />编辑终稿</button><button className="text-button report-download-button" type="button" onClick={() => downloadTextFile(downloadContent, downloadName)} title="下载完整报告"><Download size={15} />下载完整报告</button></div>
+    {editing && localizedMarkdown ? <FinalReportEditor runId={workspace.runId} initialValue={localizedMarkdown} onClose={() => setEditing(false)} onSaved={onSaved} /> : null}
     {localizedMarkdown && <section className="report-section report-full-markdown"><div className="report-section-heading"><div><h3>辩论裁决最终结果</h3><span>辩论裁决与外汇组合经理</span></div><StatusPill status="completed" /></div><div className="report-markdown"><MarkdownContent>{localizedMarkdown}</MarkdownContent></div></section>}
-    <div className="report-overview"><div className="decision-block"><span>市场背景</span><strong>{reportDisplayText(background)}</strong><small>证据强度：{backgroundStrength} · 置信度：{confidence ?? "未提供"}</small></div><div className="decision-block"><span>技术确认</span><strong>{technicalConfirmation}</strong><small>{presentation?.dataQuality === "degraded" ? "观察级结论" : "技术确认已形成"}</small></div><div className="decision-block"><span>交易动作</span><strong>{reportDisplayText(report.action || "暂不交易")}</strong><small>{reportDisplayText(report.holdingPeriod || report.action || "执行计划")}</small></div>{report.probabilities && <div className="probability-block"><span>概率分布</span>{Object.entries(report.probabilities).map(([key, value]) => <div className="probability" key={key}><label>{key === "bullish" ? "看涨" : key === "bearish" ? "看跌" : "震荡"}<b>{value ?? "-"}</b></label><div><i style={{ width: `${Math.min(100, Number(value || 0) * (Number(value || 0) <= 1 ? 100 : 1))}%` }} /></div></div>)}</div>}</div>
+    <div className="report-overview report-overview-single"><div className="decision-block"><span>交易动作</span><strong>{reportDisplayText(report.action || "暂不交易")}</strong><small>{reportDisplayText(report.holdingPeriod || report.action || "执行计划")}</small></div></div>
     <div className="report-grid">{[["入场区间", report.entry], ["止损", report.stopLoss], ["止盈", report.takeProfit]].map(([label, value]) => <div className="report-field" key={label}><span>{label}</span><strong>{value ? reportDisplayText(value) : unavailablePriceText}</strong></div>)}</div>
     {presentation && <section className="report-section"><h3>有效信息与数据限制</h3><p>{reportDisplayText(presentation.summary)}</p>{presentation.usableEvidence.length > 0 && <ul>{presentation.usableEvidence.map((item) => <li key={item}>{reportDisplayText(item)}</li>)}</ul>}{presentation.limitations.length > 0 && <ul className="report-limitations">{presentation.limitations.map((item) => <li key={item}>{reportDisplayText(item)}</li>)}</ul>}</section>}
     {rationale.length > 0 && <section className="report-section"><h3>核心依据</h3><ul>{rationale.map((item) => <li key={item}>{item}</li>)}</ul></section>}
@@ -1039,6 +1082,19 @@ export default function App(): ReactElement {
 
   const workspace = activeSnapshot(runWorkspace);
   const runActive = isRunActive(busy, workspace.status);
+  const updateVisibleReport = useCallback((markdown: string) => {
+    setRunWorkspace((current) => {
+      const snapshot = activeSnapshot(current);
+      if (!snapshot.report || !current.activeRunId) return current;
+      return {
+        ...current,
+        snapshots: {
+          ...current.snapshots,
+          [current.activeRunId]: { ...snapshot, report: { ...snapshot.report, markdown } },
+        },
+      };
+    });
+  }, []);
 
   const deleteConversation = useCallback(async (id: string) => {
     if (deletingSessionId) return;
@@ -1107,7 +1163,7 @@ export default function App(): ReactElement {
       {activeView === "canvas" && <CanvasView workspace={workspace} onSelect={setSelected} selectedAgentId={selected && "role" in selected ? selected.id : undefined} />}
       {activeView === "data" && <DataView workspace={workspace} />}
       {activeView === "logs" && <LogsView events={workspace.events} runStatus={workspace.status} onSelect={setSelected} />}
-      {activeView === "report" && <ReportView report={workspace.report} workspace={workspace} />}
+      {activeView === "report" && <ReportView report={workspace.report} workspace={workspace} onSaved={updateVisibleReport} />}
       {activeView === "settings" && <SettingsView />}
       </main>
     </div>

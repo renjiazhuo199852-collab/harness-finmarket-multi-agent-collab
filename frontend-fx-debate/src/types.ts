@@ -57,6 +57,85 @@ export interface SwarmPresetAgent {
   role: string;
   tools: string[];
   skills: string[];
+  config_revision?: string | null;
+  customized?: boolean;
+}
+
+export interface AgentCandidate {
+  system_prompt: string;
+  skills: string[];
+  skill_overrides: Record<string, string>;
+}
+
+export interface AgentSkillOption {
+  name: string;
+  description?: string;
+  category?: string;
+}
+
+export interface AgentEditorPayload {
+  preset_name: string;
+  agent_id: string;
+  role: string;
+  source: "default" | "user_override" | string;
+  revision: string;
+  updated_at?: string | null;
+  effective: AgentCandidate;
+  defaults: AgentCandidate;
+  effective_skill_contents: Record<string, string>;
+  default_skill_contents: Record<string, string>;
+  available_skills: AgentSkillOption[];
+}
+
+export interface AgentEditReview {
+  approved: boolean;
+  risk_level: string;
+  findings: Array<string | AgentReviewFinding>;
+  checks: Array<string | AgentReviewCheck>;
+}
+
+export interface AgentReviewFinding {
+  type?: string;
+  message?: string;
+  description?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentReviewCheck {
+  name?: string;
+  passed?: boolean;
+  result?: string;
+  message?: string;
+  description?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentEditProposal {
+  proposal_id: string;
+  preset_name: string;
+  agent_id: string;
+  instruction: string;
+  base_revision: string;
+  candidate: AgentCandidate;
+  diff: {
+    prompt?: string;
+    skills_added?: string[];
+    skills_removed?: string[];
+    skills_modified?: string[];
+  };
+  review: AgentEditReview;
+  created_at: string;
+  session_id?: string | null;
+}
+
+export interface AgentEditHistoryEntry {
+  action?: string;
+  proposal_id?: string;
+  instruction?: string;
+  revision?: string;
+  previous_revision?: string;
+  at?: string;
+  changed?: Record<string, unknown>;
 }
 
 export interface SwarmPresetTask {

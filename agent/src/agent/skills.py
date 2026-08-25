@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 
 @dataclass
@@ -98,7 +98,8 @@ class SkillsLoader:
     """
 
     def __init__(self, skills_dir: Optional[Path] = None,
-                 user_skills_dir: Optional[Path] = None) -> None:
+                 user_skills_dir: Optional[Path] = None,
+                 overrides: Mapping[str, str] | None = None) -> None:
         """Initialize SkillsLoader.
 
         Args:
@@ -107,6 +108,7 @@ class SkillsLoader:
         """
         self.skills_dir = skills_dir or Path(__file__).resolve().parents[1] / "skills"
         self._user_skills_dir = user_skills_dir or USER_SKILLS_DIR
+        self._overrides = dict(overrides or {})
         self.skills: List[Skill] = []
         self._load()
 
@@ -117,6 +119,24 @@ class SkillsLoader:
         (e.g. after patch_skill copies and modifies a bundled skill).
         """
         seen_names: set[str] = set()
+        # Agent-scoped overrides are applied before global user/bundled skills.
+        # They are held in the run snapshot and never mutate shared SKILL.md.
+        for name, text in sorted(self._overrides.items()):
+            meta, body = _parse_frontmatter(text)
+            # Keep the binding name stable even if the generated markdown
+            # contains a stale frontmatter name.
+            skill_name = name
+            self.skills.append(
+                Skill(
+                    name=skill_name,
+                    description=str(meta.get("description", "Agent-scoped override")),
+                    category=str(meta.get("category", "user")),
+                    body=body,
+                    dir_path=None,
+                    metadata=meta,
+                )
+            )
+            seen_names.add(skill_name)
         for directory in (self._user_skills_dir, self.skills_dir):
             if not directory or not directory.exists():
                 continue

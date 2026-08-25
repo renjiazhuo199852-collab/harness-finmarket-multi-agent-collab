@@ -416,7 +416,7 @@ def run_worker(
     llm = ChatLLM(model_name=agent_spec.model_name)
 
     # 3. Build system prompt with filtered skills
-    skills_loader = SkillsLoader()
+    skills_loader = SkillsLoader(overrides=agent_spec.skill_overrides)
     if "load_skill" in (agent_spec.tools or []):
         from src.tools.load_skill_tool import LoadSkillTool
 

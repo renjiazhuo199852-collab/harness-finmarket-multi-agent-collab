@@ -11,6 +11,8 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -66,6 +68,12 @@ def _get_swarm_runtime():
 AuthDep = Callable[..., Awaitable[Any] | Any]
 
 
+class UpdateFinalReportRequest(BaseModel):
+    """User-authored replacement for the readable final report draft."""
+
+    markdown: str = Field(min_length=1, max_length=500_000)
+
+
 def register_swarm_routes(
     app: FastAPI,
     require_auth: AuthDep | None = None,
@@ -89,6 +97,7 @@ def register_swarm_routes(
         require_auth = host.require_auth
     if require_event_stream_auth is None:
         require_event_stream_auth = host.require_event_stream_auth
+    require_settings_write_auth = host.require_settings_write_auth
 
     def _host_validate_path_param(value: str, kind: str) -> None:
         h = _sys.modules.get("api_server") or _sys.modules.get("agent.api_server")
@@ -129,6 +138,148 @@ def register_swarm_routes(
             "source": source,
             "file": path.name if path.parent == PRESETS_DIR else None,
         }
+
+    def _agent_path(preset_name: str, agent_id: str) -> None:
+        _host_validate_path_param(preset_name, "preset_name")
+        _host_validate_path_param(agent_id, "agent_id")
+
+    def _customization():
+        from src.swarm.customization import get_customization_service
+
+        return get_customization_service()
+
+    @app.get(
+        "/swarm/presets/{preset_name}/agents/{agent_id}/editor",
+        dependencies=[Depends(require_auth)],
+    )
+    async def get_agent_editor(preset_name: str, agent_id: str):
+        """Return default/effective prompt and skill configuration."""
+        _agent_path(preset_name, agent_id)
+        from src.swarm.customization import CustomizationError
+
+        try:
+            return _customization().editor_payload(preset_name, agent_id)
+        except CustomizationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/swarm/presets/{preset_name}/agents/{agent_id}/proposals",
+        dependencies=[Depends(require_settings_write_auth)],
+    )
+    async def propose_agent_edit(preset_name: str, agent_id: str, payload: dict[str, Any]):
+        """Generate and review a candidate without writing it to disk."""
+        _agent_path(preset_name, agent_id)
+        from src.swarm.customization import CustomizationError, RevisionConflict
+
+        try:
+            proposal = await run_in_threadpool(
+                _customization().propose,
+                preset_name,
+                agent_id,
+                str(payload.get("instruction", "")),
+                str(payload.get("base_revision", "")),
+                str(payload.get("session_id")) if payload.get("session_id") else None,
+            )
+            return proposal.model_dump()
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RevisionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except CustomizationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # provider errors are intentionally generic at this boundary
+            raise HTTPException(status_code=502, detail=f"agent edit proposal failed: {exc}") from exc
+
+    @app.post(
+        "/swarm/presets/{preset_name}/agents/{agent_id}/proposals/{proposal_id}/apply",
+        dependencies=[Depends(require_settings_write_auth)],
+    )
+    async def apply_agent_edit(preset_name: str, agent_id: str, proposal_id: str, payload: dict[str, Any]):
+        """Apply an approved proposal using optimistic revision checking."""
+        _agent_path(preset_name, agent_id)
+        from src.swarm.customization import CustomizationError, RevisionConflict
+
+        proposal = _customization().proposal(proposal_id)
+        if proposal is None or proposal.preset_name != preset_name or proposal.agent_id != agent_id:
+            raise HTTPException(status_code=404, detail=f"proposal {proposal_id} not found")
+        try:
+            return _customization().apply(proposal_id, str(payload.get("base_revision", "")))
+        except RevisionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/swarm/presets/{preset_name}/agents/{agent_id}/proposals/{proposal_id}/revise",
+        dependencies=[Depends(require_settings_write_auth)],
+    )
+    async def revise_agent_edit(preset_name: str, agent_id: str, proposal_id: str, payload: dict[str, Any]):
+        """Re-review a user-edited candidate without persisting it."""
+        _agent_path(preset_name, agent_id)
+        from src.swarm.customization import AgentCandidate, CustomizationError, RevisionConflict
+
+        proposal = _customization().proposal(proposal_id)
+        if proposal is None or proposal.preset_name != preset_name or proposal.agent_id != agent_id:
+            raise HTTPException(status_code=404, detail=f"proposal {proposal_id} not found")
+        try:
+            candidate = AgentCandidate.model_validate(payload.get("candidate", {}))
+            revised = await run_in_threadpool(
+                _customization().revise_proposal,
+                proposal_id,
+                str(payload.get("base_revision", "")),
+                candidate,
+            )
+            return revised.model_dump()
+        except RevisionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (CustomizationError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except CustomizationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post(
+        "/swarm/presets/{preset_name}/agents/{agent_id}/reset",
+        dependencies=[Depends(require_settings_write_auth)],
+    )
+    async def reset_agent_edit(preset_name: str, agent_id: str, payload: dict[str, Any]):
+        """Restore one agent to the bundled/user preset defaults."""
+        _agent_path(preset_name, agent_id)
+        from src.swarm.customization import CustomizationError, RevisionConflict
+
+        try:
+            return _customization().reset(preset_name, agent_id, str(payload.get("base_revision", "")))
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RevisionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except CustomizationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get(
+        "/swarm/presets/{preset_name}/agents/{agent_id}/history",
+        dependencies=[Depends(require_auth)],
+    )
+    async def get_agent_edit_history(preset_name: str, agent_id: str):
+        """Return the bounded append-only history for one agent."""
+        _agent_path(preset_name, agent_id)
+        try:
+            return {"preset_name": preset_name, "agent_id": agent_id, "entries": _customization().history(preset_name, agent_id)}
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post(
+        "/swarm/presets/{preset_name}/reload",
+        dependencies=[Depends(require_settings_write_auth)],
+    )
+    async def reload_swarm_preset(preset_name: str):
+        """Validate overrides and reload effective config for future runs."""
+        _host_validate_path_param(preset_name, "preset_name")
+        from src.swarm.customization import CustomizationError
+
+        try:
+            return _customization().reload(preset_name)
+        except (ValueError, FileNotFoundError, CustomizationError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/swarm/runs", dependencies=[Depends(require_auth)])
     async def create_swarm_run(payload: dict, http_request: Request):
@@ -212,6 +363,18 @@ def register_swarm_routes(
             "events": events,
             "evidence_bundle": _public_evidence_bundle(run),
         }
+
+    @app.put("/swarm/runs/{run_id}/report", dependencies=[Depends(require_auth)])
+    async def update_swarm_report(run_id: str, payload: UpdateFinalReportRequest):
+        """Persist a user-edited final report without changing run execution state."""
+        _host_validate_path_param(run_id, "run_id")
+        runtime = _get_swarm_runtime()
+        run = runtime._store.load_run(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        run.final_report = payload.markdown
+        runtime._store.update_run(run)
+        return {"id": run.id, "final_report": run.final_report, "updated": True}
 
     @app.get(
         "/swarm/runs/{run_id}/events",

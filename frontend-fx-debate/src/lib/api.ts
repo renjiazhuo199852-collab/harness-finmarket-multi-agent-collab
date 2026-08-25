@@ -6,6 +6,9 @@ import type {
   SwarmPresetSummary,
   SwarmRunMeta,
   SwarmTask,
+  AgentEditHistoryEntry,
+  AgentEditProposal,
+  AgentEditorPayload,
 } from "@/types";
 import { normalizeBaseUrl, readApiConfig, type ApiConfig } from "@/lib/api_config";
 
@@ -190,8 +193,24 @@ export const api = {
         : null,
     } satisfies SwarmRunDetail;
   },
+  updateSwarmReport: (id: string, markdown: string) =>
+    request<{ id: string; final_report: string; updated: boolean }>(`/swarm/runs/${encodeURIComponent(id)}/report`, {
+      method: "PUT",
+      body: JSON.stringify({ markdown }),
+    }),
   listPresets: () => request<SwarmPresetSummary[]>("/swarm/presets"),
   getPreset: (name: string) => request<SwarmPresetDetail>(`/swarm/presets/${encodeURIComponent(name)}`),
+  getAgentEditor: (preset: string, agent: string) => request<AgentEditorPayload>(`/swarm/presets/${encodeURIComponent(preset)}/agents/${encodeURIComponent(agent)}/editor`),
+  proposeAgentEdit: (preset: string, agent: string, payload: { instruction: string; base_revision: string; session_id?: string }) =>
+    request<AgentEditProposal>(`/swarm/presets/${encodeURIComponent(preset)}/agents/${encodeURIComponent(agent)}/proposals`, { method: "POST", body: JSON.stringify(payload) }),
+  reviseAgentEdit: (preset: string, agent: string, proposalId: string, payload: { base_revision: string; candidate: AgentEditProposal["candidate"] }) =>
+    request<AgentEditProposal>(`/swarm/presets/${encodeURIComponent(preset)}/agents/${encodeURIComponent(agent)}/proposals/${encodeURIComponent(proposalId)}/revise`, { method: "POST", body: JSON.stringify(payload) }),
+  applyAgentEdit: (preset: string, agent: string, proposalId: string, baseRevision: string) =>
+    request<AgentEditorPayload>(`/swarm/presets/${encodeURIComponent(preset)}/agents/${encodeURIComponent(agent)}/proposals/${encodeURIComponent(proposalId)}/apply`, { method: "POST", body: JSON.stringify({ base_revision: baseRevision }) }),
+  resetAgentEdit: (preset: string, agent: string, baseRevision: string) =>
+    request<AgentEditorPayload>(`/swarm/presets/${encodeURIComponent(preset)}/agents/${encodeURIComponent(agent)}/reset`, { method: "POST", body: JSON.stringify({ base_revision: baseRevision }) }),
+  getAgentEditHistory: (preset: string, agent: string) => request<{ preset_name: string; agent_id: string; entries: AgentEditHistoryEntry[] }>(`/swarm/presets/${encodeURIComponent(preset)}/agents/${encodeURIComponent(agent)}/history`),
+  reloadPreset: (preset: string) => request<{ preset_name: string; valid: boolean; errors: string[]; warnings: string[]; loaded_at: string; affects: string }>(`/swarm/presets/${encodeURIComponent(preset)}/reload`, { method: "POST", body: JSON.stringify({}) }),
   getLlmSettings: () => request<LlmSettings>("/settings/llm"),
   updateLlmSettings: (payload: UpdateLlmSettingsPayload) =>
     request<LlmSettings>("/settings/llm", { method: "PUT", body: JSON.stringify(payload) }),

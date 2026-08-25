@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import api_server
 import src.api.swarm_routes as swarm_routes
+import src.swarm.customization as customization
 from src.swarm.models import RunStatus, SwarmEvent, SwarmRun, SwarmTask
 from src.swarm.store import SwarmStore
 
@@ -158,6 +159,23 @@ def test_swarm_detail_includes_persisted_events_for_history_replay(
     assert response.json()["events"][0]["type"] == "tool_call"
 
 
+def test_swarm_report_update_persists_user_edited_final_draft(
+    swarm_store: SwarmStore,
+) -> None:
+    run = _create_run(swarm_store, status=RunStatus.completed)
+    run.final_report = "# 原始终稿"
+    swarm_store.update_run(run)
+
+    response = _client().put(
+        f"/swarm/runs/{run.id}/report",
+        json={"markdown": "# 用户修订后的终稿\n\n结论：等待确认"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["updated"] is True
+    assert swarm_store.load_run(run.id).final_report == "# 用户修订后的终稿\n\n结论：等待确认"
+
+
 def test_swarm_detail_projects_persisted_evidence_bundle_for_history_data_view(
     swarm_store: SwarmStore,
 ) -> None:
@@ -217,3 +235,62 @@ def test_swarm_presets_metadata_is_public_projection_with_auth(
     assert detail["layers"]
     assert "system_prompt" not in detail_response.text
     assert "prompt_template" not in detail_response.text
+
+
+def test_agent_editor_routes_keep_proposals_review_first(
+    swarm_store: SwarmStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = customization.AgentCandidate(system_prompt="Candidate", skills=[], skill_overrides={})
+    proposal = customization.AgentEditProposal(
+        proposal_id="proposal-route",
+        preset_name="fx_debate_team",
+        agent_id="pair_bull",
+        instruction="加强审查",
+        base_revision="base-revision",
+        candidate=candidate,
+        diff={"prompt": "diff", "skills_added": [], "skills_removed": [], "skills_modified": []},
+        review=customization.ProposalReview(approved=True, risk_level="low", checks=["safe"]),
+        created_at="2026-07-16T00:00:00+00:00",
+    )
+
+    class FakeCustomization:
+        def editor_payload(self, _preset: str, _agent: str):
+            return {"preset_name": "fx_debate_team", "agent_id": "pair_bull", "revision": "base-revision"}
+
+        def propose(self, *_args, **_kwargs):
+            return proposal
+
+        def proposal(self, _proposal_id: str):
+            return proposal
+
+        def apply(self, *_args, **_kwargs):
+            return {"source": "user_override", "revision": "new-revision"}
+
+        def reset(self, *_args, **_kwargs):
+            return {"source": "default", "revision": "default-revision"}
+
+        def history(self, *_args, **_kwargs):
+            return [{"action": "apply", "revision": "new-revision"}]
+
+        def reload(self, _preset: str):
+            return {"preset_name": "fx_debate_team", "valid": True, "errors": [], "warnings": [], "affects": "new_runs_only"}
+
+    monkeypatch.setattr(customization, "get_customization_service", lambda: FakeCustomization())
+    client = _client()
+
+    assert client.get("/swarm/presets/fx_debate_team/agents/pair_bull/editor").status_code == 200
+    proposal_response = client.post(
+        "/swarm/presets/fx_debate_team/agents/pair_bull/proposals",
+        json={"instruction": "加强审查", "base_revision": "base-revision"},
+    )
+    assert proposal_response.status_code == 200
+    assert proposal_response.json()["proposal_id"] == "proposal-route"
+    apply_response = client.post(
+        "/swarm/presets/fx_debate_team/agents/pair_bull/proposals/proposal-route/apply",
+        json={"base_revision": "base-revision"},
+    )
+    assert apply_response.status_code == 200
+    assert client.post("/swarm/presets/fx_debate_team/agents/pair_bull/reset", json={"base_revision": "base-revision"}).status_code == 200
+    assert client.get("/swarm/presets/fx_debate_team/agents/pair_bull/history").json()["entries"]
+    assert client.post("/swarm/presets/fx_debate_team/reload", json={}).json()["valid"] is True

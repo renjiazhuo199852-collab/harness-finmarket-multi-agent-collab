@@ -271,7 +271,14 @@ def inspect_preset(name: str) -> dict:
         "variables": sorted(declared_variables),
         "used_variables": sorted(used_variables),
         "agents": [
-            {"id": agent.id, "role": agent.role, "tools": agent.tools, "skills": agent.skills}
+            {
+                "id": agent.id,
+                "role": agent.role,
+                "tools": agent.tools,
+                "skills": agent.skills,
+                "config_revision": agent.config_revision,
+                "customized": bool(agent.config_revision),
+            }
             for agent in run.agents
         ],
         "tasks": [
@@ -312,6 +319,11 @@ def build_run_from_preset(preset_name: str, user_vars: dict[str, str]) -> SwarmR
         ValueError: If preset YAML is malformed.
     """
     data = load_preset(preset_name)
+    # Agent customization is resolved once, before the SwarmRun snapshot is
+    # created. Running tasks therefore keep their original prompt/skills.
+    from src.swarm.customization import apply_agent_overrides
+
+    data = apply_agent_overrides(preset_name, data)
 
     # Parse agents
     agents: list[SwarmAgentSpec] = []
@@ -322,6 +334,8 @@ def build_run_from_preset(preset_name: str, user_vars: dict[str, str]) -> SwarmR
             system_prompt=agent_data.get("system_prompt", ""),
             tools=agent_data.get("tools", []),
             skills=agent_data.get("skills", []),
+            skill_overrides=agent_data.get("skill_overrides", {}),
+            config_revision=agent_data.get("config_revision"),
             max_iterations=agent_data.get("max_iterations", 25),
             timeout_seconds=agent_data.get("timeout_seconds", 300),
             model_name=agent_data.get("model_name"),
