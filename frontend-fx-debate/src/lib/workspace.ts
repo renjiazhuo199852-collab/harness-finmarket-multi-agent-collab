@@ -262,7 +262,12 @@ function extractReport(data: unknown): FxReport | undefined {
       const structured = extractReport(parsed);
       if (structured) return { ...structured, markdown, raw: data };
     }
-    return { markdown, raw: data };
+    const inferredDecision = inferDecisionFromMarkdown(markdown);
+    return {
+      ...(inferredDecision ? { direction: inferredDecision.direction, action: inferredDecision.action } : {}),
+      markdown,
+      raw: data,
+    };
   }
   if (typeof data !== "object") return undefined;
   const value = data as Record<string, unknown>;
@@ -344,9 +349,16 @@ function displayDecision(value?: string): { direction: string; action: string } 
   if (!value) return undefined;
   const normalized = value.toLowerCase();
   if (["wait", "hold", "no_trade", "no-trade", "flat"].includes(normalized)) return { direction: "等待确认", action: "暂不交易" };
-  if (["long", "buy", "bull", "up"].includes(normalized)) return { direction: "偏多", action: "做多" };
-  if (["short", "sell", "bear", "down"].includes(normalized)) return { direction: "偏空", action: "做空" };
+  if (["long", "buy", "bull", "up", "做多", "看涨", "偏多"].includes(normalized)) return { direction: "偏多", action: "做多" };
+  if (["short", "sell", "bear", "down", "做空", "看跌", "偏空"].includes(normalized)) return { direction: "偏空", action: "做空" };
   return { direction: value, action: value };
+}
+
+function inferDecisionFromMarkdown(markdown: string): { direction: string; action: string } | undefined {
+  const match = markdown.match(
+    /(?:当前回测方向|决策)\s*[：:]\s*(做多|看涨|long|做空|看跌|short)(?:\s*[（(]\s*(long|short)\s*[）)])?/im,
+  );
+  return displayDecision(match?.[2] || match?.[1]);
 }
 
 const EVIDENCE_DOMAINS = ["market", "technical", "macro", "news", "mcp"] as const;

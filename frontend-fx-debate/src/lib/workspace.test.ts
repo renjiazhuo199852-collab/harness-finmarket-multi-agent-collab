@@ -126,6 +126,20 @@ describe("FX workspace event reducer", () => {
     expect(snapshot.events[1].output).toContain("上行假设");
   });
 
+  it("infers a directional action from the normalized backtest markdown", () => {
+    const snapshot = hydrateRun("session-directional-report", {
+      id: "run-directional-report",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [],
+      tasks: [],
+      final_report: "# EURUSD 外汇 Debate 结论\n\n- 决策：做空（`short`）\n\n当前回测方向：做空（short）。",
+    });
+
+    expect(snapshot.report?.direction).toBe("偏空");
+    expect(snapshot.report?.action).toBe("做空");
+  });
+
   it("keeps the parallel analyst and risk reports for the historical report view", () => {
     const snapshot = hydrateRun("session-1", {
       id: "run-agent-reports",

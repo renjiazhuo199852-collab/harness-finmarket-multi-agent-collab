@@ -21,6 +21,7 @@ from src.tools.run_fx_debate_tool import (
     _normalize_run_options,
     _persist_data_trace_events,
     _apply_presentation,
+    _select_backtest_direction,
 )
 from src.fx_debate.models import RunOptions
 
@@ -366,14 +367,16 @@ def test_run_fx_debate_builds_context_validates_dag_outputs_and_renders_report(
     assert (
         output["data_preview"]["domains"]["market"]["rows"][0]["value"]["mid"] == 1.085
     )
-    assert output["decision"]["decision"] == "wait"
+    assert output["decision"]["decision"] in {"long", "short"}
+    assert output["decision"]["decision"] == "short"
     assert output["decision"]["canonical_symbol"] == "EURUSD"
     assert output["decision"]["confidence"] == 0.35
     assert output["decision"]["presentation"]["data_quality"] == "degraded"
     assert "技术确认" in output["report_markdown"]
     assert "# EUR/USD 外汇 Debate 结论" in output["report_markdown"]
-    assert "当前建议：观望" in output["report_markdown"]
+    assert "当前回测方向：做空" in output["report_markdown"]
     assert "本地只读 Excel 冻结证据包" in output["report_markdown"]
+    assert "研究辅助输出" not in output["report_markdown"]
     assert orchestrator.called is True
     assert orchestrator.variables is not None
     assert orchestrator.variables == {
@@ -382,8 +385,8 @@ def test_run_fx_debate_builds_context_validates_dag_outputs_and_renders_report(
         "goal": "分析 EURUSD 未来两周走势。",
     }
     assert output["upstream_decision"] == {
-        "decision": "wait",
-        "risk_action": "none",
+        "decision": "short",
+        "risk_action": "short",
     }
 
 
@@ -444,7 +447,7 @@ def test_authorized_non_fx_attempt_cannot_call_fx_tool(tmp_path) -> None:
     assert orchestrator.called is False
 
 
-def test_degraded_technical_confirmation_forces_directional_decision_to_wait() -> None:
+def test_degraded_technical_confirmation_preserves_direction_and_clears_levels() -> None:
     decision = FinalDecision.model_validate(
         {
             "evidence_context_id": "fxctx-test",
@@ -492,11 +495,34 @@ def test_degraded_technical_confirmation_forces_directional_decision_to_wait() -
 
     result = _apply_presentation(decision, bundle)
 
-    assert result.decision == "wait"
+    assert result.decision == "long"
     assert result.confidence == 0.35
     assert result.trade_plan.entry_zone is None
     assert result.trade_plan.stop_loss is None
     assert result.trade_plan.targets == []
+
+
+def test_backtest_direction_uses_weighted_evidence_for_wait_fallback() -> None:
+    bundle = SimpleNamespace(
+        relative_macro_scorecard=SimpleNamespace(
+            status="complete",
+            signals=[
+                SimpleNamespace(
+                    relationship="quote_supported",
+                    evidence_ids=["fxe-rates"],
+                )
+            ],
+        ),
+        technical_regime=SimpleNamespace(
+            timeframes={
+                "1D": SimpleNamespace(state="bearish"),
+                "4H": SimpleNamespace(state="indeterminate"),
+            }
+        ),
+        presentation=SimpleNamespace(market_background="宏观背景偏空"),
+    )
+
+    assert _select_backtest_direction(None, bundle) == "short"
 
 
 def test_run_fx_debate_normalizes_common_planner_option_aliases(tmp_path) -> None:

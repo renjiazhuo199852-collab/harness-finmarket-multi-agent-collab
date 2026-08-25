@@ -15,6 +15,38 @@ from typing import Any, Dict, Optional
 # Dedicated thread pool limited to four concurrent agents to avoid exhausting the default executor.
 _AGENT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="agent")
 
+_INTERNAL_REPLY_DIAGNOSTIC = re.compile(
+    r"Evidence\s+Context|evidence_context_id|证据上下文|后端索引|索引异常|"
+    r"二次回查|无法回查|校验失败|validate_fx_output|tool_calls|trace_id|request_id",
+    re.IGNORECASE,
+)
+_INTERNAL_REPLY_SENTENCE = re.compile(
+    r"(?:^|(?<=[。！？.!?\n]))\s*[^。！？.!?\n]*?(?:Evidence\s+Context|evidence_context_id|证据上下文|后端索引|"
+    r"索引异常|二次回查|无法回查|校验失败|validate_fx_output|tool_calls|trace_id|request_id)"
+    r"[^。！？.!?\n]*[。！？.!?]?",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_user_reply(content: str | None) -> str:
+    """Hide internal evidence plumbing from the conversational reply.
+
+    Detailed diagnostics remain in the run event stream and persisted report.
+    This boundary only controls the assistant bubble shown in a conversation.
+    """
+    text = str(content or "").strip()
+    if not text:
+        return text
+    text = _INTERNAL_REPLY_SENTENCE.sub("", text)
+    lines = [
+        line
+        for line in text.splitlines()
+        if line.strip() and not _INTERNAL_REPLY_DIAGNOSTIC.search(line)
+    ]
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text or "本轮研究已完成，最终结果已生成。"
+
 from src.session.events import EventBus
 from src.session.models import (
     Attempt,
@@ -84,6 +116,32 @@ class SessionService:
         """Delete a session."""
         self.event_bus.clear(session_id)
         return self.store.delete_session(session_id)
+
+    @staticmethod
+    def _swarm_preset_title(preset_name: str) -> str:
+        """Resolve the human-readable title for a swarm preset."""
+        try:
+            from src.swarm.presets import load_preset
+
+            preset = load_preset(preset_name)
+            title = preset.get("title") if isinstance(preset, dict) else None
+            return str(title or preset_name)
+        except Exception:
+            # Preset metadata is presentation-only; it must not block a run.
+            return preset_name
+
+    def _update_default_session_title(self, session_id: str, preset_name: str) -> None:
+        """Name a default chat session after the swarm it actually launched."""
+        session = self.store.get_session(session_id)
+        if session is None or session.title.strip() not in {"", "FX Debate"}:
+            return
+        title = self._swarm_preset_title(preset_name).strip()
+        if not title:
+            return
+        session.title = title
+        session.updated_at = datetime.now().isoformat()
+        self.store.update_session(session)
+        self._search_index.index_session(session.session_id, title)
 
     def reconcile_incomplete_attempts(self) -> int:
         """Close attempts left running by a previous API process.
@@ -356,6 +414,9 @@ class SessionService:
                 if isinstance(run_id, str) and run_id:
                     attempt.swarm_run_id = run_id
                     self.store.update_attempt(attempt)
+                preset_name = data.get("preset")
+                if isinstance(preset_name, str) and preset_name:
+                    self._update_default_session_title(session_id, preset_name)
             # ``tool_result`` deliberately carries a bounded preview on SSE.
             # FX Debate places its canonical swarm id near the beginning of
             # that JSON preview, so capture it at the attempt boundary while
@@ -500,7 +561,10 @@ class SessionService:
     def _format_result_message(attempt: Attempt) -> str:
         """Format the final execution result message."""
         if attempt.status == AttemptStatus.COMPLETED:
-            return attempt.summary or "Strategy execution completed."
+            return _sanitize_user_reply(attempt.summary or "Strategy execution completed.")
         if attempt.status == AttemptStatus.CANCELLED:
             return "运行已取消：本轮研究已停止，未生成最终结论。"
-        return f"Execution failed: {attempt.error or 'unknown error'}"
+        error = attempt.error or "unknown error"
+        if _INTERNAL_REPLY_DIAGNOSTIC.search(error):
+            return "本轮研究未生成最终结果，请重新运行。"
+        return f"Execution failed: {error}"

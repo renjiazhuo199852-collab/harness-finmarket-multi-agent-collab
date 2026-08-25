@@ -539,6 +539,26 @@ class FxDataQueryAgent:
                 query=f"查询 {symbol} 从 {start} 到 {end} 的日线 OHLCV 历史行情",
                 start_date=start,
                 end_date=end,
+                max_rows=min(
+                    1000,
+                    max(250, context.market_bar_limit_per_timeframe.get("1D", 260)),
+                ),
+            ),
+            DataQueryPlan(
+                domain="bars_hourly",
+                tool="unified_search",
+                query=(
+                    f"查询 {symbol} 从 {start} 到 {end} 的 1H 小时 OHLCV 原始行情，"
+                    "用于聚合 4H K 线"
+                ),
+                start_date=start,
+                end_date=end,
+                # The evidence factory needs four complete hourly rows per 4H
+                # bucket. Keep this bounded at the MCP contract maximum.
+                max_rows=min(
+                    1000,
+                    max(500, context.market_bar_limit_per_timeframe.get("4H", 250) * 4),
+                ),
             ),
             DataQueryPlan(
                 domain="macro",
@@ -561,9 +581,11 @@ class FxDataQueryAgent:
         results: dict[str, dict[str, Any]] = {}
         errors: list[str] = []
         provider = context.provider_priority[0] if context.provider_priority else None
-        for plan in self.plan_for_debate(context):
+        bar_responses: list[dict[str, Any]] = []
+        plans = self.plan_for_debate(context)
+        for plan in plans:
             try:
-                results[plan.domain] = self.client.search(
+                response = self.client.search(
                     plan.tool,
                     plan.query,
                     provider=provider,
@@ -571,15 +593,63 @@ class FxDataQueryAgent:
                     end_date=plan.end_date,
                     max_rows=plan.max_rows,
                 )
+                if plan.domain in {"bars", "bars_hourly"}:
+                    bar_responses.append(response)
+                else:
+                    results[plan.domain] = response
             except FxDataServiceError as exc:
                 errors.append(f"{plan.domain}: {exc.code}: {exc}")
-                results[plan.domain] = {
+                error_response = {
                     "status": "error",
                     "data": [],
                     "code": exc.code,
                     "message": str(exc),
                 }
-        if not results or len(errors) == len(results):
+                if plan.domain in {"bars", "bars_hourly"}:
+                    bar_responses.append(error_response)
+                else:
+                    results[plan.domain] = error_response
+
+        successful_bars = [
+            response
+            for response in bar_responses
+            if response.get("status") == "success"
+            and isinstance(response.get("data"), list)
+        ]
+        if successful_bars:
+            merged_rows = [
+                row
+                for response in successful_bars
+                for row in response.get("data", [])
+                if isinstance(row, dict)
+            ]
+            first_meta = next(
+                (
+                    response.get("meta")
+                    for response in successful_bars
+                    if isinstance(response.get("meta"), dict)
+                ),
+                {},
+            )
+            results["bars"] = {
+                "status": "success",
+                "schema_version": successful_bars[0].get("schema_version"),
+                "data": merged_rows,
+                "meta": {
+                    **first_meta,
+                    "frequency": "mixed",
+                    "sources": [
+                        response.get("meta", {}).get("frequency")
+                        for response in successful_bars
+                        if isinstance(response.get("meta"), dict)
+                    ],
+                    "row_count": len(merged_rows),
+                },
+            }
+        elif bar_responses:
+            results["bars"] = bar_responses[0]
+
+        if not results or len(errors) == len(plans):
             raise FxDataServiceError(
                 "数据服务未返回任何可用的 FX 证据：" + "；".join(errors),
                 code="FX_DATA_UNAVAILABLE",

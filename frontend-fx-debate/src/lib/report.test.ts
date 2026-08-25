@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReportDownloadMarkdown, displayReportMarkdown, localizeReportMarkdown, sanitizeReportDisplayText } from "@/lib/report";
+import { buildReportDownloadHtml, buildReportDownloadMarkdown, displayReportMarkdown, localizeReportMarkdown, markdownToHtml, sanitizeConversationReply, sanitizeReportDisplayText } from "@/lib/report";
 
 describe("report presentation helpers", () => {
   it("localizes report headings and statuses without changing identifiers", () => {
@@ -45,6 +45,26 @@ describe("report presentation helpers", () => {
     expect(displayed).not.toContain("FX_BUNDLE_ERROR");
   });
 
+  it("builds a standalone HTML report with readable tables and code blocks", () => {
+    const html = buildReportDownloadHtml(
+      { target: "EURUSD", markdown: "# FinalDecision\n\n| Field | Value |\n|---|---|\n| action | wait |\n\n```json\n{\"decision\":\"wait\"}\n```" },
+      [{ role: "风险分析师", report: "## Risk review\n\n风险已复核" }],
+    );
+
+    expect(html).toContain("<!doctype html>");
+    expect(html).toContain("<table>");
+    expect(html).toContain("<pre><code>{&quot;decision&quot;:&quot;wait&quot;}</code></pre>");
+    expect(html).toContain("风险分析师");
+    expect(html).toContain("最终决策");
+  });
+
+  it("escapes unsafe HTML while preserving report formatting", () => {
+    const html = markdownToHtml("# 标题\n\n<script>alert(1)</script>\n\n- 项目");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).toContain("<ul>");
+    expect(html).not.toContain("<script>alert");
+  });
+
   it("keeps report logic while neutralizing evidence-state wording for the page", () => {
     const displayed = sanitizeReportDisplayText("证据不足，无法判断方向；缺少价格确认，但宏观判断偏空。");
 
@@ -54,5 +74,16 @@ describe("report presentation helpers", () => {
     expect(displayed).toContain("宏观判断偏空");
     expect(displayed).not.toContain("证据不足");
     expect(displayed).not.toContain("无法判断");
+  });
+
+  it("hides internal evidence lookup diagnostics from the conversation reply", () => {
+    const displayed = sanitizeConversationReply(
+      "EURUSD 回测结论为做空。Evidence Context 后端索引异常，无法二次回查。请查看最终报告。",
+    );
+
+    expect(displayed).toContain("EURUSD 回测结论为做空");
+    expect(displayed).toContain("请查看最终报告");
+    expect(displayed).not.toContain("Evidence Context");
+    expect(displayed).not.toContain("二次回查");
   });
 });

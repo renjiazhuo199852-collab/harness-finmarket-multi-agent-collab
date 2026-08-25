@@ -237,6 +237,7 @@ code, pre, .topbar-center code, .run-id code { font-family: "DM Mono", ui-monosp
 .canvas-context span, .canvas-context strong { display: block; }
 .canvas-context span { margin-bottom: 5px; color: var(--text-faint); font-size: 10px; }
 .canvas-context strong { overflow: hidden; color: var(--text); font-family: "DM Mono", monospace; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-context .route-id { display: block; overflow: hidden; color: var(--text-faint); font-family: "DM Mono", monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .observed-flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin: 0 0 18px; }
 .observed-flow-after { margin-top: 18px; }
 .observed-stage { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 9px; min-height: 86px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }

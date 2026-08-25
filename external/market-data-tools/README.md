@@ -47,7 +47,7 @@
 | --- | --- | --- |
 | `unified_search` | 根据数据集目录自动发现查询类型 | `query`、`provider`、日期、`max_rows` |
 | `latest_prices_search` | 查询最新价格 | `query`、`provider` |
-| `market_bars_search` | 查询日线历史行情 | `query`、`provider`、日期、`max_rows` |
+| `market_bars_search` | 查询日线或小时原始历史行情（1H，可供上层聚合 4H） | `query`、`provider`、日期、`max_rows` |
 | `macro_observations_search` | 查询宏观指标观测值 | `query`、`provider`、日期、`max_rows` |
 | `news_articles_search` | 查询相关新闻 | `query`、`provider`、日期 |
 

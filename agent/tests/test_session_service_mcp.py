@@ -10,7 +10,7 @@ import pytest
 
 from src.session.events import EventBus
 from src.session.models import Attempt, AttemptStatus, Session
-from src.session.service import SessionService
+from src.session.service import SessionService, _sanitize_user_reply
 from src.session.store import SessionStore
 
 
@@ -95,6 +95,32 @@ def test_cancel_current_persists_terminal_status_before_agent_loop_is_ready(tmp_
     assert persisted.completed_at is not None
 
 
+def test_swarm_title_updates_default_session_without_overwriting_custom_title(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("src.session.service.get_shared_index", lambda: _DummyIndex())
+    monkeypatch.setattr(
+        "src.swarm.presets.load_preset",
+        lambda name: {"name": name, "title": "Equity Research Team"},
+    )
+    service = SessionService(
+        store=SessionStore(tmp_path / "sessions"),
+        event_bus=EventBus(),
+        runs_dir=tmp_path / "runs",
+    )
+    default_session = Session(session_id="default", title="FX Debate")
+    custom_session = Session(session_id="custom", title="我的宏观复盘")
+    service.store.create_session(default_session)
+    service.store.create_session(custom_session)
+
+    service._update_default_session_title(default_session.session_id, "equity_research_team")
+    service._update_default_session_title(custom_session.session_id, "equity_research_team")
+
+    assert service.store.get_session("default").title == "Equity Research Team"
+    assert service.store.get_session("custom").title == "我的宏观复盘"
+
+
 def test_send_message_rejects_duplicate_active_attempt(tmp_path: Path) -> None:
     service = SessionService(
         store=SessionStore(tmp_path / "sessions"),
@@ -163,6 +189,23 @@ def test_cancelled_attempt_message_is_not_reported_as_execution_failure(tmp_path
     attempt.mark_cancelled(summary="cancelled by user")
 
     assert service._format_result_message(attempt) == "运行已取消：本轮研究已停止，未生成最终结论。"
+
+
+def test_conversation_reply_hides_internal_evidence_diagnostics() -> None:
+    attempt = Attempt(
+        session_id="session-1",
+        attempt_id="attempt-1",
+        summary="EURUSD 回测结论为做空。Evidence Context 后端索引异常，无法二次回查。请查看最终报告。",
+    )
+    attempt.mark_completed(summary=attempt.summary or "")
+
+    reply = SessionService._format_result_message(attempt)
+
+    assert "EURUSD 回测结论为做空" in reply
+    assert "请查看最终报告" in reply
+    assert "Evidence Context" not in reply
+    assert "二次回查" not in reply
+    assert "后端索引" not in _sanitize_user_reply(reply)
 
 
 def test_reconcile_incomplete_attempts_marks_restart_orphans_cancelled(tmp_path: Path) -> None:

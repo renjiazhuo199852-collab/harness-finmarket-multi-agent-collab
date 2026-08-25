@@ -34,6 +34,7 @@ from .market_bar_request import parse_market_bar_request
 from .market_bars_adapter import (
     MARKET_BAR_FIELDS,
     MARKET_BARS_FREQUENCY,
+    MARKET_BARS_SUPPORTED_FREQUENCIES,
     MARKET_BARS_TABLE,
     query_market_bars,
 )
@@ -289,7 +290,7 @@ def _parse_adapter_request(
                 if end_date_override
                 else None,
                 "row_limit": row_limit,
-                "supported_frequency": MARKET_BARS_FREQUENCY,
+                "supported_frequency": list(MARKET_BARS_SUPPORTED_FREQUENCIES),
             },
             lambda: parse_market_bar_request(
                 expression,

@@ -149,6 +149,20 @@ export function sanitizeReportDisplayText(text: string): string {
   ].reduce((value, [pattern, replacement]) => value.replace(pattern as RegExp, replacement as string), text);
 }
 
+/** Keep internal evidence plumbing out of the conversational assistant bubble. */
+export function sanitizeConversationReply(text: string): string {
+  const diagnostic = /Evidence\s+Context|evidence_context_id|证据上下文|后端索引|索引异常|二次回查|无法回查|校验失败|validate_fx_output|tool_calls|trace_id|request_id/i;
+  const sentence = /(?:^|(?<=[。！？.!?\n]))\s*[^。！？.!?\n]*?(?:Evidence\s+Context|evidence_context_id|证据上下文|后端索引|索引异常|二次回查|无法回查|校验失败|validate_fx_output|tool_calls|trace_id|request_id)[^。！？.!?\n]*[。！？.!?]?/gi;
+  const cleaned = text
+    .replace(sentence, "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim() && !diagnostic.test(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return cleaned || "本轮研究已完成，最终结果已生成。";
+}
+
 /** Remove machine-readable sections from the report rendered in the UI. */
 export function displayReportMarkdown(markdown: string): string {
   const output: string[] = [];
@@ -216,8 +230,164 @@ export function buildReportDownloadMarkdown(
   return `${sections.join("\n\n")}\n`;
 }
 
-export function downloadTextFile(content: string, filename: string): void {
-  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character] || character);
+}
+
+function inlineMarkdownToHtml(value: string): string {
+  let html = escapeHtml(value);
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" rel="noreferrer">$1</a>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  html = html.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
+  return html;
+}
+
+/** Convert the localized report Markdown into a standalone, browser-readable document. */
+export function markdownToHtml(markdown: string, title = "外汇辩论研究报告"): string {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const output: string[] = [];
+  let paragraph: string[] = [];
+  let listType: "ul" | "ol" | null = null;
+  let inCode = false;
+  let codeLines: string[] = [];
+  let tableRows: string[][] = [];
+
+  const closeParagraph = () => {
+    if (paragraph.length) {
+      output.push(`<p>${inlineMarkdownToHtml(paragraph.join(" "))}</p>`);
+      paragraph = [];
+    }
+  };
+  const closeList = () => {
+    if (listType) {
+      output.push(`</${listType}>`);
+      listType = null;
+    }
+  };
+  const closeTable = () => {
+    if (!tableRows.length) return;
+    const [header, ...body] = tableRows;
+    output.push(`<table><thead><tr>${header.map((cell) => `<th>${inlineMarkdownToHtml(cell.trim())}</th>`).join("")}</tr></thead>`);
+    if (body.length) output.push(`<tbody>${body.map((row) => `<tr>${row.map((cell) => `<td>${inlineMarkdownToHtml(cell.trim())}</td>`).join("")}</tr>`).join("")}</tbody>`);
+    output.push("</table>");
+    tableRows = [];
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (inCode) {
+      if (trimmed.startsWith("```")) {
+        output.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        inCode = false;
+        codeLines = [];
+      } else {
+        codeLines.push(line);
+      }
+      continue;
+    }
+    if (trimmed.startsWith("```")) {
+      closeParagraph();
+      closeList();
+      closeTable();
+      inCode = true;
+      continue;
+    }
+    const tableMatch = trimmed.match(/^\|(.+)\|$/);
+    if (tableMatch) {
+      const cells = tableMatch[1].split("|").map((cell) => cell.trim());
+      if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
+      closeParagraph();
+      closeList();
+      tableRows.push(cells);
+      continue;
+    }
+    closeTable();
+    if (!trimmed) {
+      closeParagraph();
+      closeList();
+      continue;
+    }
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      closeParagraph();
+      closeList();
+      output.push(`<h${heading[1].length}>${inlineMarkdownToHtml(heading[2])}</h${heading[1].length}>`);
+      continue;
+    }
+    const quote = trimmed.match(/^>\s?(.*)$/);
+    if (quote) {
+      closeParagraph();
+      closeList();
+      output.push(`<blockquote>${inlineMarkdownToHtml(quote[1])}</blockquote>`);
+      continue;
+    }
+    const listItem = trimmed.match(/^([-*]|\d+[.)])\s+(.+)$/);
+    if (listItem) {
+      closeParagraph();
+      const nextType = /^\d/.test(listItem[1]) ? "ol" : "ul";
+      if (listType !== nextType) {
+        closeList();
+        listType = nextType;
+        output.push(`<${listType}>`);
+      }
+      output.push(`<li>${inlineMarkdownToHtml(listItem[2])}</li>`);
+      continue;
+    }
+    closeList();
+    paragraph.push(trimmed);
+  }
+  if (inCode) output.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+  closeParagraph();
+  closeList();
+  closeTable();
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
+:root{color-scheme:light}body{margin:0;background:#f5f7fa;color:#1f2937;font:15px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}main{max-width:1040px;margin:32px auto;padding:36px 44px;background:#fff;box-shadow:0 8px 30px rgba(15,23,42,.08)}h1{margin-top:0;font-size:30px;color:#172033}h2{margin-top:34px;padding-bottom:8px;border-bottom:1px solid #e5e7eb;color:#243b53}h3{margin-top:26px;color:#334e68}h4{color:#486581}p{margin:12px 0}blockquote{margin:16px 0;padding:10px 16px;border-left:4px solid #f08c46;background:#fff7ed;color:#52606d}ul,ol{padding-left:26px}li{margin:4px 0}code{padding:2px 5px;border-radius:4px;background:#f1f5f9;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}pre{overflow:auto;padding:16px;border-radius:6px;background:#111827;color:#e5e7eb;white-space:pre-wrap;word-break:break-word}pre code{padding:0;background:none;color:inherit}table{width:100%;margin:18px 0;border-collapse:collapse;font-size:14px}th,td{padding:9px 10px;border:1px solid #d9e2ec;text-align:left;vertical-align:top}th{background:#f0f4f8;color:#243b53}a{color:#0f766e;text-decoration:none}@media print{body{background:#fff}main{margin:0;max-width:none;box-shadow:none;padding:0}}
+</style>
+</head>
+<body><main>${output.join("\n")}</main></body>
+</html>
+`;
+}
+
+export function buildReportDownloadHtml(
+  report: DownloadReport,
+  agentReports: Array<Pick<AgentReport, "role" | "report">>,
+  target?: string,
+): string {
+  const markdown = buildReportDownloadMarkdown(report, agentReports, target);
+  return markdownToHtml(markdown, `${target || report.target || "外汇辩论"} 研究报告`);
+}
+
+/** Open a print-ready HTML report so the browser can save it as a PDF. */
+export function printHtmlAsPdf(html: string): void {
+  const printWindow = window.open("", "_blank");
+  if (!printWindow) return;
+  printWindow.document.open();
+  printWindow.document.write(html);
+  printWindow.document.close();
+  printWindow.addEventListener("load", () => {
+    printWindow.focus();
+    printWindow.print();
+  }, { once: true });
+}
+
+export function downloadTextFile(content: string, filename: string, mimeType = "text/plain;charset=utf-8"): void {
+  const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;

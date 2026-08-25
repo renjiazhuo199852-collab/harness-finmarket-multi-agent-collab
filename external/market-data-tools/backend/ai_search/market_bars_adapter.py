@@ -1,13 +1,13 @@
-"""``source.market_bars`` 的受控日线查询适配器。
+"""``source.market_bars`` 的受控日线/小时查询适配器。
 
-适配器只接受前序已经确认的数据集、字段和供应商标识。当前源表没有月、季、年
-或小时原始数据，因此查询固定使用 ``daily`` 和 ``date``；月/季/年聚合属于后续
-阶段，不在本适配器中隐式完成。
+适配器只接受前序已经确认的数据集、字段和供应商标识。目录仍登记一个
+``LSEG_MARKET_BARS`` 日线数据集，但物理表同时保存 ``daily`` 和 ``hourly`` 原始
+行；4H 请求只读取小时行，不在这里伪造或聚合指标。
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -16,6 +16,8 @@ from psycopg2 import sql
 
 MARKET_BARS_TABLE = "market_bars"
 MARKET_BARS_FREQUENCY = "daily"
+MARKET_BARS_SUPPORTED_FREQUENCIES = ("daily", "hourly")
+INTRADAY_TIME_COLUMN = "bar_time"
 MARKET_BAR_FIELDS = (
     "date",
     "open",
@@ -76,13 +78,16 @@ def query_market_bars(
             "storage_table_name": storage_table_name,
             "reason": "market_bars 路线确认的数据集没有指向 market_bars",
         }
-    if dataset_frequency != MARKET_BARS_FREQUENCY or frequency != MARKET_BARS_FREQUENCY:
+    if (
+        dataset_frequency != MARKET_BARS_FREQUENCY
+        or frequency not in MARKET_BARS_SUPPORTED_FREQUENCIES
+    ):
         return {
             "status": "unsupported_frequency",
             "rows": [],
             "frequency": frequency,
             "dataset_frequency": dataset_frequency,
-            "reason": "当前 market_bars 只支持 daily 原始数据",
+            "reason": "当前 market_bars 只支持 daily 或 hourly 原始数据",
         }
     if field_resolution.get("status") != "resolved":
         return {"status": "skipped", "rows": [], "reason": "字段目录没有 resolved"}
@@ -100,9 +105,33 @@ def query_market_bars(
             "reason": "字段计划缺少日线 OHLCV 字段",
         }
 
+    selected_fields = list(MARKET_BAR_FIELDS)
+    if frequency == "hourly":
+        # ``bar_time`` is part of the fixed source.market_bars physical contract,
+        # but is intentionally not exposed as a user/model-selectable catalog field.
+        selected_fields.append(INTRADAY_TIME_COLUMN)
     select_columns = sql.SQL(", ").join(
-        sql.Identifier(field_by_name[field]["physical_column_name"])
-        for field in MARKET_BAR_FIELDS
+        sql.Identifier(
+            field_by_name[field]["physical_column_name"]
+            if field in field_by_name
+            else INTRADAY_TIME_COLUMN
+        )
+        for field in selected_fields
+    )
+    date_column_name = (
+        INTRADAY_TIME_COLUMN
+        if frequency == "hourly"
+        else field_by_name["date"]["physical_column_name"]
+    )
+    end_bound = end_date + timedelta(days=1)
+    date_predicate = (
+        sql.SQL("{date_column} >= %s AND {date_column} < %s").format(
+            date_column=sql.Identifier(date_column_name)
+        )
+        if frequency == "hourly"
+        else sql.SQL("{date_column} >= %s AND {date_column} <= %s").format(
+            date_column=sql.Identifier(date_column_name)
+        )
     )
     statement = sql.SQL(
         "SELECT {columns} "
@@ -110,27 +139,31 @@ def query_market_bars(
         "WHERE source = %s "
         "AND source_identifier = %s "
         "AND frequency = %s "
-        "AND {date_column} >= %s "
-        "AND {date_column} <= %s "
+        "AND {date_predicate} "
         "ORDER BY {date_column} ASC "
         "LIMIT %s"
     ).format(
         columns=select_columns,
         table=sql.Identifier("source", storage_table_name),
-        date_column=sql.Identifier(field_by_name["date"]["physical_column_name"]),
+        date_column=sql.Identifier(date_column_name),
+        date_predicate=date_predicate,
     )
+    end_parameter = end_bound if frequency == "hourly" else end_date
     cursor.execute(
         statement,
-        (provider, identifier, frequency, start_date, end_date, limit),
+        (provider, identifier, frequency, start_date, end_parameter, limit),
     )
     rows = cursor.fetchall()
-    data_rows = [
-        {
+    data_rows = []
+    for row in rows:
+        values = {
             field_name: _json_value(value)
-            for field_name, value in zip(MARKET_BAR_FIELDS, row)
+            for field_name, value in zip(MARKET_BAR_FIELDS, row[: len(MARKET_BAR_FIELDS)])
         }
-        for row in rows
-    ]
+        values["frequency"] = frequency
+        if frequency == "hourly":
+            values["bar_time"] = _json_value(row[-1])
+        data_rows.append(values)
     return {
         "status": "resolved" if data_rows else "not_found",
         "instrument_id": instrument_id,
@@ -151,5 +184,9 @@ def query_market_bars(
         "fields": field_resolution.get("fields", []),
         "rows": data_rows,
         "row_count": len(data_rows),
-        "reason": "已按日期升序返回日线 OHLCV" if data_rows else "指定日期范围没有匹配的日线记录",
+        "reason": (
+            f"已按 bar_time 升序返回 {frequency} OHLCV"
+            if data_rows
+            else f"指定日期范围没有匹配的 {frequency} 记录"
+        ),
     }

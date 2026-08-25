@@ -331,7 +331,7 @@ class AiSearchFxEvidenceSource:
                     if isinstance(row, dict)
                 ]
         if not tables.get("bars"):
-            warnings.append("AI Search 当前公开 market_bars 适配器提供日线数据；4H 证据可能不足")
+            warnings.append("AI Search market_bars 未返回日线或小时原始 K 线；4H 证据可能不足")
         return RawFxSnapshot(
             source_name="ai_search",
             prices=tables.get("prices", []),

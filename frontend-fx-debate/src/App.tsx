@@ -9,7 +9,7 @@ import { ApiError, api } from "@/lib/api";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { AgentEditorPanel } from "@/components/AgentEditorPanel";
 import { SettingsView } from "@/components/SettingsView";
-import { buildReportDownloadMarkdown, displayReportMarkdown, downloadTextFile, localizeReportMarkdown, sanitizeReportDisplayText } from "@/lib/report";
+import { buildReportDownloadHtml, buildReportDownloadMarkdown, displayReportMarkdown, downloadTextFile, localizeReportMarkdown, printHtmlAsPdf, sanitizeConversationReply, sanitizeReportDisplayText } from "@/lib/report";
 import { SessionTransport, type SSEStatus } from "@/lib/sse";
 import { nextStreamingIdentity, streamingIdentityCopy, type StreamingIdentity } from "@/lib/streaming_identity";
 import { buildResearchProgress, dependencyAwareAgentStatus, stageAwareAgentStatus, type ProgressStageStatus, type ResearchProgressStage } from "@/lib/progress";
@@ -194,6 +194,9 @@ function durationText(elapsedMs?: number): string {
 function friendlyError(value?: string): string {
   if (!value) return "";
   if (value.includes("cancelled by user")) return "本次研究已停止，可以继续发送新的问题";
+  if (/Evidence\s+Context|evidence_context_id|证据上下文|后端索引|索引异常|二次回查|无法回查|校验失败|validate_fx_output|tool_calls|trace_id|request_id/i.test(value)) {
+    return "本轮研究未生成最终结果，请重新运行。";
+  }
   if (value.includes("insufficient_quota") || value.includes("额度已用完")) return "LLM API 额度不足，任务已停止";
   if (value.includes("HTTP 502") || value.includes("Bad gateway")) return "LLM 服务网关暂时不可用（HTTP 502），本次研究未能启动";
   if (value.includes("UNEXPECTED_EOF") || value.includes("ConnectError")) return "LLM 连接中断，任务未完成";
@@ -285,12 +288,12 @@ function ChatView({
         <div className="message-body">{message.role === "assistant"
           ? message.content.startsWith("Execution failed:")
             ? <p className="message-error-text">{friendlyError(message.content)}</p>
-            : <MarkdownContent>{message.content}</MarkdownContent>
+          : <MarkdownContent>{sanitizeConversationReply(message.content)}</MarkdownContent>
           : message.content}</div>
       </article>)}
       {streamingText && <article className="message message-assistant streaming-message">
         <div className="message-meta"><span>{streamingCopy.name}</span><span className="live-dot">{streamingCopy.status}</span></div>
-        <div className="message-body"><MarkdownContent>{streamingText}</MarkdownContent></div>
+        <div className="message-body"><MarkdownContent>{sanitizeConversationReply(streamingText)}</MarkdownContent></div>
       </article>}
       {reasoning && !streamingText && <div className="reasoning"><Activity size={14} /> Agent 正在整理证据和协作结果…</div>}
       <ResearchProgressPanel workspace={workspace} onView={onView} onSelectAgent={onSelectAgent} />
@@ -432,6 +435,7 @@ function CanvasView({ workspace, onSelect, selectedAgentId }: { workspace: Works
   const target = workspace.variables.target || workspace.variables.symbol || "当前问题";
   const timeframe = workspace.variables.timeframe || workspace.variables.analysis_timeframes || workspace.variables.horizon || "未指定";
   const route = workspace.preset || (workspace.runId ? "协作运行" : "等待路由结果");
+  const routeTitle = runPresetTitle(workspace.preset);
   const pendingMessage = (agent: AgentSnapshot): string => {
     const task = workspace.tasks.find((item) => item.id === agent.taskId || item.agent_id === agent.id);
     const dependencies = (task?.depends_on || []).map((taskId) => {
@@ -442,8 +446,8 @@ function CanvasView({ workspace, onSelect, selectedAgentId }: { workspace: Works
     return workspace.runId ? "任务已创建，等待服务端调度" : "等待服务端返回运行计划";
   };
   return <div className="workspace-view canvas-view">
-    <div className="view-heading"><div><span className="eyebrow">DYNAMIC WORKFLOW</span><h2>本次请求的实际处理链路</h2><p>处理方向、角色数量和先后关系由服务端路由结果决定。点击角色可查看该节点真实收到和输出的信息。</p></div><StatusPill status={workspace.status} /></div>
-    <div className="canvas-context"><div><span>研究对象</span><strong>{target}</strong></div><div><span>分析周期</span><strong>{timeframe}</strong></div><div><span>处理路径</span><strong>{route}</strong></div><div><span>当前阶段</span><strong>{progress.currentLabel}</strong></div><div><span>任务 / 事件</span><strong>{workspace.tasks.length} / {workspace.events.length}</strong></div></div>
+    <div className="view-heading"><div><span className="eyebrow">DYNAMIC WORKFLOW</span><h2>{routeTitle} · 协作画布</h2><p>本次请求的实际处理链路由服务端路由结果决定。点击角色可查看该节点真实收到和输出的信息。</p></div><StatusPill status={workspace.status} /></div>
+    <div className="canvas-context"><div><span>研究对象</span><strong>{target}</strong></div><div><span>分析周期</span><strong>{timeframe}</strong></div><div><span>处理路径</span><strong>{routeTitle}</strong><small className="route-id">{route}</small></div><div><span>当前阶段</span><strong>{progress.currentLabel}</strong></div><div><span>任务 / 事件</span><strong>{workspace.tasks.length} / {workspace.events.length}</strong></div></div>
     {beforeExecution.length > 0 && <div className="observed-flow" aria-label="运行准备阶段">{beforeExecution.map((stage, index) => <ObservedStage stage={stage} index={index} key={stage.id} />)}</div>}
     {executionStages.length === 0 ? <EmptyState title={workspace.status === "idle" ? "等待问题" : "等待服务端返回执行计划"} detail="这里不会预先放置固定 Agent；只有本次路由实际创建的任务才会出现在画布中。" /> : <div className="dynamic-dag" aria-label="服务端任务依赖图">
       {executionStages.map((stage, index) => <div className="dag-fragment" key={stage.id}>
@@ -821,16 +825,17 @@ function ReportView({ report, workspace, onSaved }: { report?: WorkspaceSnapshot
   const [editing, setEditing] = useState(false);
   if (!report) return <div className="workspace-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>最终结果由本次路由选中的实际处理链路生成。</p></div></div><EmptyState title="报告尚未生成" detail={workspace.status === "failed" ? workspace.lastError || "本次运行失败，请查看流程日志。" : "等待当前处理链路完成。"} /></div>;
   const agentReportItems = reportAgents(workspace);
-  const downloadContent = buildReportDownloadMarkdown(report, agentReportItems, workspace.variables.target || workspace.variables.symbol);
+  const downloadContent = buildReportDownloadHtml(report, agentReportItems, workspace.variables.target || workspace.variables.symbol);
+  const downloadMarkdown = buildReportDownloadMarkdown(report, agentReportItems, workspace.variables.target || workspace.variables.symbol);
   const localizedMarkdown = report.markdown ? sanitizeReportDisplayText(localizeReportMarkdown(displayReportMarkdown(report.markdown))) : undefined;
-  const downloadName = `${(workspace.variables.target || workspace.variables.symbol || "fx-debate").replace(/[^a-zA-Z0-9_-]+/g, "-")}-研究报告-${new Date().toISOString().slice(0, 10)}.md`;
+  const downloadName = `${(workspace.variables.target || workspace.variables.symbol || "fx-debate").replace(/[^a-zA-Z0-9_-]+/g, "-")}-研究报告-${new Date().toISOString().slice(0, 10)}.html`;
   const presentation = report.presentation;
-  const unavailablePriceText = "不适用";
+  const unavailablePriceText = "未生成";
   const rationale = visibleReportLogic([...(presentation?.usableEvidence || []), ...(report.rationale || [])]);
   const invalidation = visibleReportLogic(report.invalidation);
   const risks = visibleReportLogic(report.risks);
   return <div className="workspace-view report-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>完整呈现裁决、研究节点、数据限制与审计逻辑。</p></div><StatusPill status={workspace.status} /></div>
-    <div className="report-actions"><button className="text-button report-download-button" type="button" onClick={() => setEditing(true)} disabled={!localizedMarkdown || !workspace.runId} title="编辑终稿"><Pencil size={15} />编辑终稿</button><button className="text-button report-download-button" type="button" onClick={() => downloadTextFile(downloadContent, downloadName)} title="下载完整报告"><Download size={15} />下载完整报告</button></div>
+    <div className="report-actions"><button className="text-button report-download-button" type="button" onClick={() => setEditing(true)} disabled={!localizedMarkdown || !workspace.runId} title="编辑终稿"><Pencil size={15} />编辑终稿</button><button className="text-button report-download-button" type="button" onClick={() => downloadTextFile(downloadMarkdown, downloadName.replace(/\.html$/, ".md"), "text/markdown;charset=utf-8")} title="下载 Markdown 报告"><Download size={15} />下载 Markdown</button><button className="text-button report-download-button" type="button" onClick={() => downloadTextFile(downloadContent, downloadName, "text/html;charset=utf-8")} title="下载 HTML 报告"><Download size={15} />下载 HTML</button><button className="text-button report-download-button" type="button" onClick={() => printHtmlAsPdf(downloadContent)} title="打印或保存为 PDF"><Download size={15} />导出 PDF</button></div>
     {editing && localizedMarkdown ? <FinalReportEditor runId={workspace.runId} initialValue={localizedMarkdown} onClose={() => setEditing(false)} onSaved={onSaved} /> : null}
     {localizedMarkdown && <section className="report-section report-full-markdown"><div className="report-section-heading"><div><h3>辩论裁决最终结果</h3><span>辩论裁决与外汇组合经理</span></div><StatusPill status="completed" /></div><div className="report-markdown"><MarkdownContent>{localizedMarkdown}</MarkdownContent></div></section>}
     <div className="report-overview report-overview-single"><div className="decision-block"><span>交易动作</span><strong>{reportDisplayText(report.action || "暂不交易")}</strong><small>{reportDisplayText(report.holdingPeriod || report.action || "执行计划")}</small></div></div>
@@ -906,10 +911,16 @@ function runTime(value?: string | null): string {
   return Number.isNaN(date.getTime()) ? "刚刚" : date.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
+function runPresetTitle(preset?: string | null): string {
+  if (!preset) return "FX Debate";
+  return presetDisplay({ name: preset, title: preset, source: "bundled" }).title;
+}
+
 function runTitle(run: DebateRunSummary, index: number): string {
   const promptPair = run.prompt?.match(/\b[A-Z]{3}(?:[\/-]?[A-Z]{3})\b/i)?.[0];
-  const target = typeof run.variables?.target === "string" ? run.variables.target : promptPair || "FX Debate";
-  return `${target} · 第 ${index + 1} 次`;
+  const target = typeof run.variables?.target === "string" ? run.variables.target : promptPair;
+  const title = runPresetTitle(run.preset);
+  return `${title}${target ? ` · ${target}` : ""} · 第 ${index + 1} 次`;
 }
 
 function RunSwitcher({ summaries, activeRunId, onSelect }: { summaries: DebateRunSummary[]; activeRunId?: string; onSelect: (runId: string) => void }): ReactElement | null {
@@ -1008,6 +1019,7 @@ export default function App(): ReactElement {
         refreshSessions();
       }
     }
+    if (event.type === "swarm.started") refreshSessions();
     const runId = runIdFromEvent(event);
     setRunWorkspace((current) => applyRunEvent(current, event));
     if (runId) updateUrl({ run: runId });
@@ -1224,6 +1236,7 @@ export default function App(): ReactElement {
         setDirectRunId(runId);
         setSessionId("");
         setMessages([]);
+        setRunWorkspace(emptyRunWorkspace());
         updateUrl({ session: undefined, run: runId, view: "canvas" });
         setActiveView("canvas");
         void api.getSwarmRun(runId).then((run) => setRunWorkspace((current) => hydrateRunSnapshot(current, run as unknown as Record<string, unknown>))).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "无法加载新运行"));

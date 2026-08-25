@@ -129,6 +129,24 @@ def test_model_candidate_accepts_structured_skill_override_as_serialized_content
     }
 
 
+def test_model_candidate_falls_back_to_current_for_empty_or_partial_payload(
+    service: customization.AgentCustomizationService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = service.effective_candidate("customization-test", "analyst")
+    monkeypatch.setattr(service, "_call_model", lambda _messages: {})
+
+    empty = service._model_candidate("customization-test", "analyst", current, "增加风险提示", None)
+
+    monkeypatch.setattr(service, "_call_model", lambda _messages: {"candidate": {"system_prompt": "新的中文提示"}})
+    partial = service._model_candidate("customization-test", "analyst", current, "增加风险提示", None)
+
+    assert empty == current
+    assert partial.system_prompt == "新的中文提示"
+    assert partial.skills == current.skills
+    assert partial.skill_overrides == current.skill_overrides
+
+
 def test_extract_json_accepts_fenced_json_with_intro_text() -> None:
     payload = customization.AgentCustomizationService._extract_json(
         "修改方案如下：\n```json\n{\"system_prompt\": \"新的中文提示\", \"skills\": [], \"skill_overrides\": {}}\n```\n以上。"

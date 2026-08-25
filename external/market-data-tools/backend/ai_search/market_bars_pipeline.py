@@ -1,8 +1,8 @@
-"""``market_bars`` 独立日线查询路线的在线编排。
+"""``market_bars`` 独立日线/小时查询路线的在线编排。
 
 本模块与 ``latest_price_pipeline`` 保持业务边界独立，只复用共享查询解析、工具检索、
-数据集检索和字段目录读取能力。当前路线只查询 source 中已有的 ``daily`` 原始 K 线，
-不对月、季、年数据做隐式聚合。
+数据集检索和字段目录读取能力。当前路线查询 source 中已有的 ``daily`` 或
+``hourly`` 原始 K 线，不对月、季、年数据做隐式聚合。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from .market_bar_request import parse_market_bar_request
 from .market_bars_adapter import (
     MARKET_BAR_FIELDS,
     MARKET_BARS_FREQUENCY,
+    MARKET_BARS_SUPPORTED_FREQUENCIES,
     MARKET_BARS_TABLE,
     query_market_bars,
 )
@@ -44,7 +45,7 @@ MARKET_BAR_DOWNSTREAM_STAGES = (
     "dataset_field_catalog",
     "market_bars_query",
 )
-MARKET_BARS_CATALOG_CONTEXT = "OHLCV market bars daily"
+MARKET_BARS_CATALOG_CONTEXT = "OHLCV market bars daily hourly 1H 4H"
 
 
 def _market_route_guard(
@@ -212,7 +213,7 @@ def search_market_bars_route(
             "start_date_override": start_date_override.isoformat() if start_date_override else None,
             "end_date_override": end_date_override.isoformat() if end_date_override else None,
             "row_limit": row_limit,
-            "supported_frequency": MARKET_BARS_FREQUENCY,
+            "supported_frequency": list(MARKET_BARS_SUPPORTED_FREQUENCIES),
         },
         lambda: parse_market_bar_request(
             market_request_query,
@@ -319,7 +320,7 @@ def search_market_bars_route(
         dataset_resolution.get("storage_table_name") != MARKET_BARS_TABLE
         or dataset_resolution.get("frequency") != MARKET_BARS_FREQUENCY
     ):
-        reason = "数据集不是当前支持的 daily market_bars 数据集，已停止查询"
+        reason = "数据集不是当前支持的 market_bars 数据集，已停止查询"
         warnings.append(reason)
         _skip_stage(trace_callback, "dataset_field_catalog", {}, reason)
         _skip_stage(trace_callback, "market_bars_query", {}, reason)
@@ -344,7 +345,7 @@ def search_market_bars_route(
                 "dataset_id": dataset_resolution.get("dataset_id"),
                 "storage_table_name": dataset_resolution.get("storage_table_name"),
                 "requested_fields": list(MARKET_BAR_FIELDS),
-                "selection_mode": "market_bars_daily_route_policy",
+                "selection_mode": "market_bars_frequency_route_policy",
                 "llm": False,
             },
             lambda: resolve_dataset_fields(
@@ -367,7 +368,7 @@ def search_market_bars_route(
                     "identifier": selected_identifier.get("identifier"),
                     "dataset_id": dataset_resolution.get("dataset_id"),
                     "storage_table_name": dataset_resolution.get("storage_table_name"),
-                    "frequency": MARKET_BARS_FREQUENCY,
+                    "frequency": market_bar_request.get("frequency") or MARKET_BARS_FREQUENCY,
                     "start_date": market_bar_request["start_date"],
                     "end_date": market_bar_request["end_date"],
                     "fields": [
@@ -386,7 +387,7 @@ def search_market_bars_route(
                     result["field_resolution"],
                     date.fromisoformat(market_bar_request["start_date"]),
                     date.fromisoformat(market_bar_request["end_date"]),
-                    frequency=MARKET_BARS_FREQUENCY,
+                    frequency=market_bar_request.get("frequency") or MARKET_BARS_FREQUENCY,
                     limit=market_bar_request["row_limit"],
                 ),
                 lambda value: value,

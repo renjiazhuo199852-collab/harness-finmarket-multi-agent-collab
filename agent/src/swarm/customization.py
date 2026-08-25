@@ -394,7 +394,10 @@ class AgentCustomizationService:
         return self._extract_json(response.content or "")
 
     @staticmethod
-    def _normalize_model_candidate_payload(raw: Mapping[str, Any]) -> dict[str, Any]:
+    def _normalize_model_candidate_payload(
+        raw: Mapping[str, Any],
+        current: AgentCandidate | None = None,
+    ) -> dict[str, Any]:
         """Normalize provider-shaped skill bodies before strict validation.
 
         The editor contract stores complete skill content as strings, but some
@@ -404,6 +407,31 @@ class AgentCustomizationService:
         arbitrary values.
         """
         normalized = dict(raw)
+        # Coding models sometimes wrap the requested object in a transport
+        # envelope, or return an empty object after a tool/JSON negotiation.
+        # Unwrap known envelopes and preserve the current candidate for fields
+        # that were omitted. This makes a partial model response a no-op rather
+        # than an accidental prompt/skill deletion.
+        for envelope in ("candidate", "data", "result", "output"):
+            nested = normalized.get(envelope)
+            if isinstance(nested, Mapping):
+                normalized = dict(nested)
+                break
+        aliases = {
+            "systemPrompt": "system_prompt",
+            "skillOverrides": "skill_overrides",
+        }
+        for source, target in aliases.items():
+            if target not in normalized and source in normalized:
+                normalized[target] = normalized[source]
+        if current is not None:
+            defaults = current.model_dump()
+            if not isinstance(normalized.get("system_prompt"), str) or not normalized["system_prompt"].strip():
+                normalized["system_prompt"] = defaults["system_prompt"]
+            if not isinstance(normalized.get("skills"), list):
+                normalized["skills"] = defaults["skills"]
+            if not isinstance(normalized.get("skill_overrides"), Mapping):
+                normalized["skill_overrides"] = defaults["skill_overrides"]
         overrides = normalized.get("skill_overrides")
         if not isinstance(overrides, Mapping):
             return normalized
@@ -440,6 +468,17 @@ class AgentCustomizationService:
         normalized["skill_overrides"] = converted
         return normalized
 
+    @staticmethod
+    def _has_candidate_fields(raw: Mapping[str, Any]) -> bool:
+        """Return whether a provider response contains an actual candidate."""
+        payload: Mapping[str, Any] = raw
+        for envelope in ("candidate", "data", "result", "output"):
+            nested = payload.get(envelope)
+            if isinstance(nested, Mapping):
+                payload = nested
+                break
+        return any(key in payload for key in ("system_prompt", "systemPrompt", "skills", "skill_overrides", "skillOverrides"))
+
     def _model_candidate(
         self,
         preset_name: str,
@@ -455,7 +494,7 @@ class AgentCustomizationService:
             "available_skills": self.list_skills(),
             "instruction": instruction,
         }
-        raw = self._call_model([
+        messages = [
             {
                 "role": "system",
                 "content": (
@@ -467,9 +506,29 @@ class AgentCustomizationService:
                 ),
             },
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ])
+        ]
         try:
-            return AgentCandidate.model_validate(self._normalize_model_candidate_payload(raw))
+            raw = self._call_model(messages)
+        except CustomizationError as exc:
+            # One bounded retry handles providers that occasionally emit an
+            # empty/non-JSON response under a long prompt without retrying
+            # semantic validation failures indefinitely.
+            if "model returned invalid JSON" not in str(exc):
+                raise
+            retry_messages = [
+                *messages,
+                {"role": "user", "content": "上一轮未返回有效 JSON。请只返回包含 system_prompt、skills、skill_overrides 的 JSON 对象，不要解释。"},
+            ]
+            raw = self._call_model(retry_messages)
+        if not self._has_candidate_fields(raw):
+            retry_messages = [
+                *messages,
+                {"role": "user", "content": "上一轮返回为空。请只返回包含 system_prompt、skills、skill_overrides 的 JSON 对象，不要解释。"},
+            ]
+            raw = self._call_model(retry_messages)
+        try:
+            normalized = self._normalize_model_candidate_payload(raw, current)
+            return AgentCandidate.model_validate(normalized)
         except Exception as exc:
             raise CustomizationError(f"model candidate failed validation: {exc}") from exc
 

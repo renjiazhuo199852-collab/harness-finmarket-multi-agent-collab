@@ -37,17 +37,20 @@ export function summaryFromStarted(sessionId: string | undefined, event: Session
   const runId = runIdFromEvent(event);
   if (!runId) return undefined;
   const data = event.data;
+  const variables = data.variables && typeof data.variables === "object" ? data.variables as Record<string, unknown> : {};
   return {
     run_id: runId,
     session_id: sessionId || "",
     preset: typeof data.preset === "string" ? data.preset : undefined,
     status: statusOf(data.status),
     created_at: new Date().toISOString(),
-    variables: data.variables && typeof data.variables === "object" ? data.variables as Record<string, unknown> : {},
+    prompt: typeof data.prompt === "string" ? data.prompt : typeof variables.goal === "string" ? variables.goal : undefined,
+    variables,
   };
 }
 
 export function summaryFromRun(sessionId: string | undefined, run: Record<string, unknown>): DebateRunSummary {
+  const variables = run.user_vars && typeof run.user_vars === "object" ? run.user_vars as Record<string, unknown> : {};
   return {
     run_id: String(run.id || run.run_id || ""),
     session_id: sessionId || "",
@@ -55,7 +58,8 @@ export function summaryFromRun(sessionId: string | undefined, run: Record<string
     status: statusOf(run.status),
     created_at: typeof run.created_at === "string" ? run.created_at : undefined,
     completed_at: typeof run.completed_at === "string" ? run.completed_at : undefined,
-    variables: run.user_vars && typeof run.user_vars === "object" ? run.user_vars as Record<string, unknown> : {},
+    prompt: typeof run.prompt === "string" ? run.prompt : typeof variables.goal === "string" ? variables.goal : undefined,
+    variables,
   };
 }
 

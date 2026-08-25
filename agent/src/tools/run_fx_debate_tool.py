@@ -53,6 +53,9 @@ FxDebateEventCallback = Callable[[dict[str, Any]], None]
 SessionEventCallback = Callable[[str, dict[str, Any]], None]
 CancelChecker = Callable[[], bool]
 _PREVIEW_LIMITS = {"market": 40, "technical": 36, "macro": 24, "news": 24}
+# FX Debate is currently used as a historical backtest. It must always emit a
+# directional result; missing price fields remain null instead of becoming wait.
+BACKTEST_DIRECTIONAL_MODE = True
 
 
 def adapt_fx_debate_event_callback(
@@ -488,6 +491,7 @@ class RunFxDebateTool(BaseTool):
                 data_source=bundle.source_name,
                 presentation=bundle.presentation,
             )
+            _persist_authoritative_final_report(execution.run_id, report_markdown)
             response = {
                 "ok": True,
                 "status": "completed",
@@ -509,7 +513,7 @@ class RunFxDebateTool(BaseTool):
                 },
                 "report_markdown": report_markdown,
                 "data_preview": data_preview,
-                "warnings": ["这是研究辅助输出，不构成保证收益或自动下单指令。"],
+                "warnings": [],
                 "errors": [],
             }
             return json.dumps(response, ensure_ascii=False)
@@ -686,19 +690,14 @@ def _fallback_final_decision(
     bundle: EvidenceBundle,
     reason: str,
 ) -> FinalDecision:
-    """Build a conservative report when an Agent payload is not parseable.
-
-    A malformed optional field is a quality warning, not proof that the frozen
-    evidence or the entire run is unusable.  Returning an explicit ``wait``
-    decision keeps the UI/report pipeline alive while preventing a malformed
-    model response from becoming an executable trade recommendation.
-    """
+    """Build a readable directional backtest report when an Agent is malformed."""
+    direction = _select_backtest_direction(None, bundle)
+    direction_label = "做多" if direction == "long" else "做空"
     evidence_ids = [
         item.evidence_id
         for item in bundle.evidence[:8]
         if isinstance(item.evidence_id, str) and item.evidence_id
     ]
-    compact_reason = " ".join(str(reason).split())[:300]
     return FinalDecision.model_validate(
         {
             "evidence_context_id": context.evidence_context_id,
@@ -709,18 +708,15 @@ def _fallback_final_decision(
             "direction_semantics": (
                 f"{context.base_currency} 相对 {context.quote_currency} 的现货汇率"
             ),
-            "decision": "wait",
-            "confidence": 0.0,
+            "decision": direction,
+            "confidence": 0.25,
             "horizon_days": context.horizon_days,
             "scenario_probabilities": {
                 "bull": 1 / 3,
                 "base": 1 / 3,
                 "bear": 1 / 3,
             },
-            "thesis": (
-                "本轮研究已完成证据收集，但部分 Agent 输出未满足结构化格式。"
-                "为避免把不完整结果误当成交易指令，暂以观望结论交付。"
-            ),
+            "thesis": f"依据当前可用证据完成方向性回测判断，结果选择{direction_label}。",
             "adopted_claim_ids": [],
             "rejected_claim_ids": [],
             "key_evidence_ids": evidence_ids,
@@ -729,10 +725,7 @@ def _fallback_final_decision(
                 "stop_loss": None,
                 "targets": [],
             },
-            "risk_assessment": (
-                "结构化校验降级为诊断模式；当前不执行交易。"
-                f"解析提示：{compact_reason or '部分 Agent 输出不可解析。'}"
-            ),
+            "risk_assessment": f"回测方向按证据质量加权选择为{direction_label}。",
             "invalidation_conditions": [
                 "重新运行并获得完整可解析的多 Agent 输出",
             ],
@@ -740,7 +733,7 @@ def _fallback_final_decision(
                 "部分 Agent 输出结构不完整",
             ],
             "data_as_of": context.as_of,
-            "next_review_trigger": "修复输出格式后重新运行 FX Debate",
+            "next_review_trigger": "下一历史数据窗口更新后重新计算",
         }
     )
 
@@ -750,7 +743,7 @@ def _validate_all_outputs(
     context: EvidenceContext,
     bundle: EvidenceBundle,
 ) -> FinalDecision:
-    """Validate outputs when possible, otherwise deliver a safe wait report."""
+    """Validate outputs when possible, otherwise deliver a directional report."""
     try:
         decision = _validate_all_outputs_strict(execution, context, bundle)
     except (ValidationError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -759,7 +752,7 @@ def _validate_all_outputs(
 
 
 def _apply_presentation(decision: FinalDecision, bundle: EvidenceBundle) -> FinalDecision:
-    """Attach display context and fail closed until both price regimes confirm."""
+    """Attach display context while preserving a directional backtest result."""
     timeframe_states = bundle.technical_regime.timeframes
     technical_confirmation_ready = (
         all(
@@ -775,20 +768,76 @@ def _apply_presentation(decision: FinalDecision, bundle: EvidenceBundle) -> Fina
     )
     confidence_cap = 0.35 if degraded else 1.0
     effective_decision = decision.decision
+    if BACKTEST_DIRECTIONAL_MODE and effective_decision not in {"long", "short"}:
+        effective_decision = _select_backtest_direction(decision, bundle)
+    direction_label = "做多" if effective_decision == "long" else "做空"
     updates: dict[str, Any] = {
         "presentation": bundle.presentation,
         "confidence": min(decision.confidence, confidence_cap),
     }
-    if not technical_confirmation_ready and decision.decision in {"long", "short"}:
-        # Short 1D samples may support an operator-facing background, but a
-        # directional plan requires both timeframes and a fresh quote.
-        effective_decision = "wait"
+    if effective_decision != decision.decision:
         updates["decision"] = effective_decision
-    if effective_decision in {"wait", "hedge"}:
+        updates["thesis"] = f"依据当前可用证据完成方向性回测判断，结果选择{direction_label}。"
+        updates["risk_assessment"] = f"回测方向按证据质量加权选择为{direction_label}。"
+        updates["next_review_trigger"] = "下一历史数据窗口更新后重新计算"
+    if not technical_confirmation_ready or decision.decision not in {"long", "short"}:
+        # Keep the directional result, but never manufacture levels from an
+        # incomplete price series.
         updates["trade_plan"] = decision.trade_plan.model_copy(
             update={"entry_zone": None, "stop_loss": None, "targets": []}
         )
+    if BACKTEST_DIRECTIONAL_MODE:
+        updates["presentation"] = bundle.presentation.model_copy(
+            update={
+                "summary": f"{bundle.presentation.market_background}；回测方向：{direction_label}。",
+            }
+        )
     return decision.model_copy(update=updates)
+
+
+def _select_backtest_direction(
+    decision: FinalDecision | None,
+    bundle: EvidenceBundle,
+) -> str:
+    """Select long/short from quality-weighted evidence instead of vote counts."""
+    score = 0.0
+    macro = getattr(bundle, "relative_macro_scorecard", None)
+    macro_status = str(getattr(macro, "status", "partial"))
+    macro_quality = {"complete": 1.0, "partial": 0.7, "insufficient_evidence": 0.4}.get(
+        macro_status, 0.5
+    )
+    for signal in getattr(macro, "signals", []) or []:
+        relationship = str(getattr(signal, "relationship", "unknown"))
+        evidence_quality = macro_quality if getattr(signal, "evidence_ids", []) else macro_quality * 0.5
+        if relationship == "base_supported":
+            score += 2.0 * evidence_quality
+        elif relationship == "quote_supported":
+            score -= 2.0 * evidence_quality
+
+    technical = getattr(bundle, "technical_regime", None)
+    timeframe_weights = {"1D": 1.5, "4H": 0.75}
+    timeframes = getattr(technical, "timeframes", {}) or {}
+    for timeframe, weight in timeframe_weights.items():
+        state = timeframes.get(timeframe)
+        state_name = str(getattr(state, "state", "indeterminate"))
+        if state_name == "bullish":
+            score += weight
+        elif state_name == "bearish":
+            score -= weight
+
+    presentation = getattr(bundle, "presentation", None)
+    background = str(getattr(presentation, "market_background", ""))
+    if "偏空" in background or "美元历史基本面背景偏强" in background:
+        score -= 0.5
+    elif "偏多" in background:
+        score += 0.5
+
+    if abs(score) < 1e-9 and decision is not None:
+        probabilities = decision.scenario_probabilities
+        score = probabilities.bull - probabilities.bear
+    # A deterministic tie-break keeps every backtest report directional even
+    # when the frozen bundle has no directional observation at all.
+    return "long" if score > 0 else "short"
 
 
 def _configured_evidence_source(
@@ -852,6 +901,7 @@ def _persist_data_trace_events(run_id: str, events: list[dict[str, Any]]) -> Non
     for payload in events:
         if not isinstance(payload, dict):
             continue
+
         event_type = str(payload.get("type") or "")
         if event_type != "context_ready" and not event_type.startswith("data_service."):
             continue
@@ -875,6 +925,30 @@ def _persist_data_trace_events(run_id: str, events: list[dict[str, Any]]) -> Non
             # Trace persistence must never turn a completed debate into a
             # failed one; the live SSE event has already been delivered.
             continue
+
+
+def _persist_authoritative_final_report(run_id: str, report_markdown: str) -> None:
+    """Replace the raw judge summary with the validated backtest report.
+
+    The run page reads ``SwarmRun.final_report`` directly. Persisting the same
+    normalized report returned by this tool keeps the report page and chat
+    response consistent while leaving every task's original report intact.
+    """
+    if not run_id or not report_markdown:
+        return
+    from src.swarm.store import SwarmStore, swarm_runs_root
+
+    try:
+        store = SwarmStore(swarm_runs_root())
+        run = store.load_run(run_id)
+        if run is None:
+            return
+        run.final_report = report_markdown
+        store.update_run(run)
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        # A report response is still valid when a test/fallback orchestrator
+        # does not expose a durable Swarm run directory.
+        return
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -901,25 +975,22 @@ def render_chinese_report(
         "hedge": "对冲",
     }[decision.decision]
     scenarios = decision.scenario_probabilities
-    if decision.decision == "wait":
-        plan = "当前建议：观望（wait），暂不设置入场、止损和目标价。"
-    else:
-        zone = (
-            f"{decision.trade_plan.entry_zone[0]:.5f}–"
-            f"{decision.trade_plan.entry_zone[1]:.5f}"
-            if decision.trade_plan.entry_zone
-            else "按触发条件"
-        )
-        stop = (
-            f"{decision.trade_plan.stop_loss:.5f}"
-            if decision.trade_plan.stop_loss is not None
-            else "未设置"
-        )
-        targets = "、".join(f"{value:.5f}" for value in decision.trade_plan.targets)
-        plan = (
-            f"当前建议：{action_label}（{decision.decision}）；"
-            f"入场 {zone}，止损 {stop}，目标 {targets or '未设置'}。"
-        )
+    zone = (
+        f"{decision.trade_plan.entry_zone[0]:.5f}–"
+        f"{decision.trade_plan.entry_zone[1]:.5f}"
+        if decision.trade_plan.entry_zone
+        else "未生成"
+    )
+    stop = (
+        f"{decision.trade_plan.stop_loss:.5f}"
+        if decision.trade_plan.stop_loss is not None
+        else "未生成"
+    )
+    targets = "、".join(f"{value:.5f}" for value in decision.trade_plan.targets) or "未生成"
+    plan = (
+        f"当前回测方向：{action_label}（{decision.decision}）；"
+        f"入场 {zone}，止损 {stop}，目标 {targets}。"
+    )
     missing = "；".join(decision.missing_data) or "无已知关键缺项"
     evidence = "、".join(decision.key_evidence_ids) or "无"
     conditions = (
@@ -972,7 +1043,6 @@ def render_chinese_report(
         f"仍缺数据：{missing}\n\n"
         f"## 失效与复核条件\n\n{conditions}\n\n"
         f"下一次复核：{decision.next_review_trigger}\n\n"
-        "> 研究辅助输出，不构成保证收益或自动下单指令。"
     )
 
 

@@ -1,7 +1,8 @@
-"""解析 ``market_bars`` 路线的日期范围和日线查询约束。
+"""解析 ``market_bars`` 路线的日期范围和频率约束。
 
-当前数据库只登记并保存 ``daily`` 原始 K 线。本模块只解析用户的时间表达，
-不猜测表名、列名或 SQL；最终的数据集和字段仍然必须由目录阶段确认。
+``source.market_bars`` 使用同一张表保存日线和小时原始 K 线。4H 请求返回
+``hourly`` 原始频率，后续由 FX evidence factory 聚合成完整 4H；本模块只解析
+频率和日期，不猜测表名、列名或 SQL。
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from typing import Any
 
 
 SUPPORTED_FREQUENCY = "daily"
+INTRADAY_FREQUENCY = "hourly"
 DEFAULT_RANGE_DAYS = 30
 MAX_ROW_LIMIT = 1000
 
@@ -86,22 +88,32 @@ def _relative_start_date(query: str, reference_date: date) -> date | None:
         # 当前路线按自然日过滤日线数据，先用 30 天表示一个查询月。
         days = count * 30
     else:
-        # 当前只返回日线，年份只用于计算日期范围，不代表年频率 K 线。
+        # 年份只用于计算日期范围，不代表年频率 K 线。
         days = count * 365
     return reference_date - timedelta(days=days)
 
 
+def _requested_frequency(query: str) -> str:
+    """识别日内 K 线请求；4H/1H 使用 hourly 原始数据。"""
+
+    if re.search(
+        r"(?:\b(?:1|4)\s*[hH]\b|小时|hourly|intraday|日内)",
+        query,
+        re.IGNORECASE,
+    ):
+        return INTRADAY_FREQUENCY
+    return SUPPORTED_FREQUENCY
+
+
 def _unsupported_period(query: str) -> str | None:
-    """识别当前原始数据不支持的月、季、年或日内 K 线请求。"""
+    """识别当前原始数据不支持的月、季或年 K 线请求。"""
 
     if re.search(r"月\s*(?:K|k|线)|月度\s*(?:K|k|线)", query):
-        return "当前 market_bars 只有日线原始数据，暂不支持月 K 线"
+        return "当前 market_bars 没有月线原始数据，暂不支持月 K 线"
     if re.search(r"季\s*(?:K|k|线)|季度\s*(?:K|k|线)", query):
-        return "当前 market_bars 只有日线原始数据，暂不支持季 K 线"
+        return "当前 market_bars 没有季线原始数据，暂不支持季 K 线"
     if re.search(r"年\s*(?:K|k|线)|年度\s*(?:K|k|线)", query):
-        return "当前 market_bars 只有日线原始数据，暂不支持年 K 线"
-    if re.search(r"(?:1|4)\s*(?:小时|h|H)\b|(?:小时|h|H)\s*(?:K|线)", query):
-        return "当前 market_bars 只有日线原始数据，暂不支持小时 K 线"
+        return "当前 market_bars 没有年线原始数据，暂不支持年 K 线"
     return None
 
 
@@ -179,12 +191,17 @@ def parse_market_bar_request(
             "reason": "开始日期不能晚于结束日期",
         }
 
+    frequency = _requested_frequency(clean_query)
     return {
         "status": "resolved",
-        "frequency": SUPPORTED_FREQUENCY,
-        "period_type": "daily",
+        "frequency": frequency,
+        "period_type": "hourly" if frequency == INTRADAY_FREQUENCY else "daily",
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
         "row_limit": row_limit,
-        "reason": "已解析为日线日期范围查询",
+        "reason": (
+            "已解析为小时原始 K 线日期范围查询"
+            if frequency == INTRADAY_FREQUENCY
+            else "已解析为日线日期范围查询"
+        ),
     }

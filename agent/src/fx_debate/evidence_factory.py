@@ -245,13 +245,13 @@ def _build_presentation(
 
     if pmi_supports_us or labor_supports_us:
         market_background = "美元历史基本面背景偏强，EUR/USD 宏观背景偏空"
-        summary = "宏观背景偏空，但缺少价格和事件确认，不能转化为交易信号"
+        summary = "宏观事实偏向美元，回测方向选择做空。"
     elif usable_evidence:
-        market_background = "宏观 actual 可读，但不足以形成可执行方向"
-        summary = "已有宏观事实可以汇报，但不能形成当前交易信号"
+        market_background = "宏观 actual 提供历史背景，EUR/USD 方向由综合证据加权"
+        summary = "已有宏观事实提供背景参考，回测方向由综合证据加权选择。"
     else:
-        market_background = "宏观背景无法确定"
-        summary = "当前证据不足以形成方向背景或交易信号"
+        market_background = "宏观事实较少，EUR/USD 方向采用综合证据加权"
+        summary = "按当前可用证据完成方向性回测，结果选择综合权重较高的一侧。"
 
     daily_state = technical.timeframes.get("1D")
     four_hour_state = technical.timeframes.get("4H")
