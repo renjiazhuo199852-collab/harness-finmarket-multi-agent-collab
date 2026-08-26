@@ -31,6 +31,7 @@
 <p align="center">
   <a href="https://vibetrading.wiki/">Website</a> &nbsp;&middot;&nbsp;
   <a href="https://vibetrading.wiki/docs/">Docs</a> &nbsp;&middot;&nbsp;
+  <a href="#-fx-debate-workspace">FX Debate Workspace</a> &nbsp;&middot;&nbsp;
   <a href="#-news">News</a> &nbsp;&middot;&nbsp;
   <a href="#-key-features">Features</a> &nbsp;&middot;&nbsp;
   <a href="#-shadow-account">Shadow Account</a> &nbsp;&middot;&nbsp;
@@ -47,6 +48,30 @@
 </p>
 
 ---
+
+## 🧭 FX Debate Workspace
+
+This fork includes a runnable, multi-agent foreign-exchange research workspace. It combines a FastAPI backend, a React workspace, an AI Search service, and an MCP data path so financial researchers can inspect the evidence, workflow, and final report in one place.
+
+### Current implementation
+
+- **Seven-node FX Debate workflow**: macro and technical analysis, bull and bear viewpoints, two debate agents, an independent risk review, and a final judge/portfolio manager. The debate agents remain visually grouped as one debate stage in the canvas.
+- **MCP-first data chain**: SSH tunnel → MCP stdio `unified_search` → AI Search → FX API → workspace. Startup runs an MCP preflight and fails closed when the data service is unavailable; Excel fallback is explicit and does not silently replace MCP.
+- **Two query paths**: `分析 EURUSD 未来两周走势。` starts the research workflow, while `查询美元兑欧元最新汇率` uses the direct market-query path without starting a debate.
+- **Agent Center customization**: each agent can receive a Chinese natural-language change request. The model returns a reviewed prompt/skill proposal and diff; users can edit the proposal, apply it, view history, refresh, or restore the bundled default. Changes affect new runs only and never rewrite an existing run snapshot.
+- **Human-readable reporting**: the final report keeps the verdict and all four research-node reports, while machine-readable output remains available through the download action. Reports can be downloaded as Markdown or HTML and printed/saved as PDF.
+- **Safe execution**: the system is advisory and does not place live orders. Tool allowlists, task dependencies, platform rules, and safety constraints are runtime-controlled.
+
+### Start locally
+
+```bash
+cd /Users/xiaoranguo/Documents/ZJU/project/ICBC_intern/harness-finmarket-multi-agent-collab
+FRONTEND_PORT=5899 ./start_fx_debate.sh
+```
+
+The launcher checks and stops stale services, establishes the SSH tunnel, runs the MCP preflight, then starts AI Search, the FX API, and the frontend. The default local endpoints are: frontend `5898` (or `5899` above), FX API `8899`, AI Search `8011`, and the tunneled data service `15433`. SSH may prompt for the remote password; credentials are never written to the repository.
+
+For configuration, troubleshooting, data-source behavior, API routes, and tests, see [`README_FX_DEBATE.md`](README_FX_DEBATE.md).
 
 ## 📰 News
 
