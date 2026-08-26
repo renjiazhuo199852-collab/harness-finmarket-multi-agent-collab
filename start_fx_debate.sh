@@ -35,7 +35,11 @@ API_STARTUP_ATTEMPTS="${API_STARTUP_ATTEMPTS:-180}"
 FRONTEND_STARTUP_ATTEMPTS="${FRONTEND_STARTUP_ATTEMPTS:-60}"
 MCP_PREFLIGHT_TIMEOUT_SECONDS="${MCP_PREFLIGHT_TIMEOUT_SECONDS:-60}"
 MCP_REQUIRED="${MCP_REQUIRED:-1}"
-MCP_SMOKE_QUERY="${MCP_SMOKE_QUERY:-查询 EURUSD 最近一个月的日线行情}"
+# The current MCP catalog has EURUSD-related macro observations but does not
+# guarantee a market-bars dataset.  The preflight only needs a real, supported
+# query to verify the stdio -> unified_search -> database chain; callers can
+# override this with MCP_SMOKE_QUERY when a different dataset is provisioned.
+MCP_SMOKE_QUERY="${MCP_SMOKE_QUERY:-查询与 EURUSD 相关的宏观指标}"
 
 SSH_ENABLED="${SSH_ENABLED:-1}"
 SSH_USER="${SSH_USER:-root}"
@@ -69,7 +73,7 @@ usage() {
   SSH_HOST=101.35.55.7     SSH 主机
   SSH_ENABLED=0            跳过 SSH 隧道
   MCP_PREFLIGHT_TIMEOUT_SECONDS=60  MCP 启动握手和数据烟测超时（秒）
-  MCP_SMOKE_QUERY=...       MCP 启动烟测查询（默认：EURUSD 最近一个月日线行情）
+  MCP_SMOKE_QUERY=...       MCP 启动烟测查询（默认：EURUSD 相关宏观指标）
   MCP_REQUIRED=0             允许回退到 Excel/其他数据源（默认 1，强制 MCP）
   START_AI_SEARCH_FRONTEND=1  同时启动 AI Search 调试前端（默认关闭）
 EOF

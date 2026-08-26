@@ -26,6 +26,13 @@ _INTERNAL_REPLY_SENTENCE = re.compile(
     r"[^。！？.!?\n]*[。！？.!?]?",
     re.IGNORECASE,
 )
+_CONFIDENCE_LINE = re.compile(r"^\s*(?:[-*•]\s*)?(?:置信度|confidence)\s*[：:]?.*$", re.IGNORECASE)
+_CONFIDENCE_PHRASE = re.compile(
+    r"(?:置信度|confidence)\s*(?:(?:为|是|is|：|:|=)\s*)?"
+    r"(?:较高|较低|高|中|低|弱|强|high|medium|low|[0-9]+(?:\.[0-9]+)?\s*%?)"
+    r"[。；;,，]?",
+    re.IGNORECASE,
+)
 
 
 def _sanitize_user_reply(content: str | None) -> str:
@@ -38,10 +45,13 @@ def _sanitize_user_reply(content: str | None) -> str:
     if not text:
         return text
     text = _INTERNAL_REPLY_SENTENCE.sub("", text)
+    text = _CONFIDENCE_PHRASE.sub("", text)
     lines = [
         line
         for line in text.splitlines()
-        if line.strip() and not _INTERNAL_REPLY_DIAGNOSTIC.search(line)
+        if line.strip()
+        and not _INTERNAL_REPLY_DIAGNOSTIC.search(line)
+        and not _CONFIDENCE_LINE.search(line)
     ]
     text = "\n".join(lines)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()

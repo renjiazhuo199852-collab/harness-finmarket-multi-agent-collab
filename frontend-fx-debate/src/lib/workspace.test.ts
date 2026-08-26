@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { applySessionEvent, emptySnapshot, fromStarted, hydrateHistoricalMessage, hydrateRun, isFxPreset } from "@/lib/workspace";
+import { applySessionEvent, emptySnapshot, fromStarted, hydrateHistoricalMessage, hydrateRun, isFinalReportReady, isFxPreset } from "@/lib/workspace";
 
 describe("FX workspace event reducer", () => {
+  it("only treats a report as final after the workflow completes", () => {
+    expect(isFinalReportReady("idle")).toBe(false);
+    expect(isFinalReportReady("running")).toBe(false);
+    expect(isFinalReportReady("failed")).toBe(false);
+    expect(isFinalReportReady("cancelled")).toBe(false);
+    expect(isFinalReportReady("completed")).toBe(true);
+  });
+
   it("hydrates only the agents and tasks returned by swarm.started", () => {
     const snapshot = fromStarted("session-1", {
       run_id: "run-1",
@@ -138,6 +146,21 @@ describe("FX workspace event reducer", () => {
 
     expect(snapshot.report?.direction).toBe("偏空");
     expect(snapshot.report?.action).toBe("做空");
+  });
+
+  it("infers generated price levels from the normalized backtest markdown", () => {
+    const snapshot = hydrateRun("session-price-plan", {
+      id: "run-price-plan",
+      preset_name: "fx_debate_team",
+      status: "completed",
+      agents: [],
+      tasks: [],
+      final_report: "# EURUSD 外汇 Debate 结论\n\n## 交易建议\n\n当前回测方向：做空（short）；入场 1.08420–1.08580，止损 1.08900，目标 1.08020、1.07780。",
+    });
+
+    expect(snapshot.report?.entry).toBe("1.08420–1.08580");
+    expect(snapshot.report?.stopLoss).toBe("1.08900");
+    expect(snapshot.report?.takeProfit).toBe("1.08020、1.07780");
   });
 
   it("keeps the parallel analyst and risk reports for the historical report view", () => {

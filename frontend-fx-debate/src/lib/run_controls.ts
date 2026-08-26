@@ -3,6 +3,11 @@ export interface RunControlState {
   cancelling: boolean;
 }
 
+/** Session history uses `active` while its latest attempt is still running. */
+export function isSessionRunning(status: string | undefined): boolean {
+  return status === "active" || status === "pending" || status === "running" || status === "waiting_user";
+}
+
 export function isRunActive(
   busy: boolean,
   status: string | undefined,

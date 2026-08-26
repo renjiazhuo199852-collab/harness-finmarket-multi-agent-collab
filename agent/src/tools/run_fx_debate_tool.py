@@ -22,6 +22,7 @@ from src.fx_debate.contracts import (
     HypothesisArgumentV2,
     RelativeStateV2,
     RiskReview,
+    TradePlan,
 )
 from src.fx_debate.data_query_agent import FxDataServiceError
 from src.fx_debate.evidence_factory import EvidenceBundle, FxEvidenceFactory
@@ -54,7 +55,8 @@ SessionEventCallback = Callable[[str, dict[str, Any]], None]
 CancelChecker = Callable[[], bool]
 _PREVIEW_LIMITS = {"market": 40, "technical": 36, "macro": 24, "news": 24}
 # FX Debate is currently used as a historical backtest. It must always emit a
-# directional result; missing price fields remain null instead of becoming wait.
+# directional result and a deterministic price plan when a usable price anchor
+# exists in the frozen evidence bundle.
 BACKTEST_DIRECTIONAL_MODE = True
 
 
@@ -259,6 +261,10 @@ def _normalize_run_options(value: dict[str, Any]) -> dict[str, Any]:
         "low": "conservative",
         "medium": "balanced",
         "moderate": "balanced",
+        # Some planners use neutral for a balanced risk budget.  Keep the
+        # public RunOptions contract strict while normalizing this alias at
+        # the tool boundary.
+        "neutral": "balanced",
         "中等": "balanced",
         "平衡": "balanced",
         "高": "aggressive",
@@ -780,12 +786,19 @@ def _apply_presentation(decision: FinalDecision, bundle: EvidenceBundle) -> Fina
         updates["thesis"] = f"依据当前可用证据完成方向性回测判断，结果选择{direction_label}。"
         updates["risk_assessment"] = f"回测方向按证据质量加权选择为{direction_label}。"
         updates["next_review_trigger"] = "下一历史数据窗口更新后重新计算"
-    if not technical_confirmation_ready or decision.decision not in {"long", "short"}:
-        # Keep the directional result, but never manufacture levels from an
-        # incomplete price series.
-        updates["trade_plan"] = decision.trade_plan.model_copy(
-            update={"entry_zone": None, "stop_loss": None, "targets": []}
+    if BACKTEST_DIRECTIONAL_MODE and (
+        not technical_confirmation_ready or not _trade_plan_is_complete(decision)
+    ):
+        # The backtest report still needs a comparable plan when 4H confirmation
+        # is absent.  Build it from the latest frozen quote/daily close and a
+        # bounded volatility proxy; never ask the model to invent these levels.
+        fallback_plan = _build_backtest_trade_plan(
+            effective_decision,
+            decision,
+            bundle,
         )
+        if fallback_plan is not None:
+            updates["trade_plan"] = fallback_plan
     if BACKTEST_DIRECTIONAL_MODE:
         updates["presentation"] = bundle.presentation.model_copy(
             update={
@@ -793,6 +806,127 @@ def _apply_presentation(decision: FinalDecision, bundle: EvidenceBundle) -> Fina
             }
         )
     return decision.model_copy(update=updates)
+
+
+def _trade_plan_is_complete(decision: FinalDecision) -> bool:
+    """Return whether the model supplied a usable three-part price plan."""
+    plan = decision.trade_plan
+    return bool(
+        plan.entry_zone is not None
+        and plan.stop_loss is not None
+        and plan.targets
+        and all(
+            isinstance(value, (int, float)) and value > 0
+            for value in (
+                plan.entry_zone[0],
+                plan.entry_zone[1],
+                plan.stop_loss,
+                *plan.targets,
+            )
+        )
+    )
+
+
+def _build_backtest_trade_plan(
+    direction: str,
+    decision: FinalDecision,
+    bundle: EvidenceBundle,
+) -> TradePlan | None:
+    """Generate comparable FX levels from the best available frozen price data.
+
+    The calculation intentionally uses only an observed quote/daily close and
+    a volatility proxy already present in the evidence bundle. It is a
+    deterministic backtest plan, not an LLM-generated price guess.
+    """
+    anchor = _latest_price_anchor(bundle)
+    if anchor is None:
+        anchor = _decision_price_anchor(decision)
+    if anchor is None or anchor <= 0:
+        return None
+
+    volatility = _price_volatility_proxy(bundle, anchor)
+    entry_half_width = max(volatility * 0.25, anchor * 0.0005)
+    risk_unit = max(volatility, anchor * 0.0015)
+    entry_low = max(anchor - entry_half_width, 0.00001)
+    entry_high = anchor + entry_half_width
+    if direction == "long":
+        stop = max(anchor - 1.25 * risk_unit, 0.00001)
+        targets = [anchor + 1.5 * risk_unit, anchor + 2.25 * risk_unit]
+    else:
+        stop = anchor + 1.25 * risk_unit
+        targets = [
+            max(anchor - 1.5 * risk_unit, 0.00001),
+            max(anchor - 2.25 * risk_unit, 0.00001),
+        ]
+
+    precision = 3 if anchor >= 10 else 5
+    return decision.trade_plan.model_copy(
+        update={
+            "entry_zone": (
+                round(entry_low, precision),
+                round(entry_high, precision),
+            ),
+            "stop_loss": round(stop, precision),
+            "targets": [round(value, precision) for value in targets],
+        }
+    )
+
+
+def _latest_price_anchor(bundle: EvidenceBundle) -> float | None:
+    """Choose the newest positive quote or close from registered evidence."""
+    candidates: list[tuple[datetime, float]] = []
+    for item in getattr(bundle, "evidence", []) or []:
+        value = item.value
+        if item.name == "spot_quote" and isinstance(value, dict):
+            price = next(
+                (
+                    _finite_positive(value.get(key))
+                    for key in ("mid", "last", "bid", "ask")
+                    if _finite_positive(value.get(key)) is not None
+                ),
+                None,
+            )
+        elif item.name == "latest_close":
+            price = _finite_positive(value)
+        else:
+            price = None
+        if price is not None:
+            candidates.append((item.observation_time, price))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _decision_price_anchor(decision: FinalDecision) -> float | None:
+    """Use a model-supplied entry midpoint only as an emergency seed."""
+    zone = decision.trade_plan.entry_zone
+    if zone is None:
+        return None
+    return _finite_positive((zone[0] + zone[1]) / 2)
+
+
+def _price_volatility_proxy(bundle: EvidenceBundle, anchor: float) -> float:
+    """Prefer ATR/range metrics, then use a small FX-relative fallback."""
+    timeframes = bundle.technical_regime.timeframes
+    for timeframe in ("1D", "4H"):
+        state = timeframes.get(timeframe)
+        metrics = getattr(state, "metrics", {}) if state is not None else {}
+        atr = _finite_positive(metrics.get("atr_14"))
+        if atr is not None:
+            return max(atr, anchor * 0.0015)
+        high = _finite_positive(metrics.get("high_20"))
+        low = _finite_positive(metrics.get("low_20"))
+        if high is not None and low is not None and high > low:
+            return max((high - low) / 4, anchor * 0.0015)
+    return max(anchor * 0.003, 0.0003)
+
+
+def _finite_positive(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 and number == number and number != float("inf") else None
 
 
 def _select_backtest_direction(
@@ -1028,7 +1162,6 @@ def render_chinese_report(
     return (
         f"# {decision.display_symbol} 外汇 Debate 结论\n\n"
         f"- 决策：{action_label}（`{decision.decision}`）\n"
-        f"- 置信度：{decision.confidence:.0%}\n"
         f"- 判断期限：{decision.horizon_days} 天\n"
         f"- 数据截止：{decision.data_as_of.isoformat()}\n"
         f"- 数据政策：{data_policy}\n\n"

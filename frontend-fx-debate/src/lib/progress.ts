@@ -50,6 +50,8 @@ function fxRoleLabel(agentId: string): string | undefined {
     pair_bull: "多头观点分析师",
     pair_bear: "空头观点分析师",
     macro_technical: "宏观与技术分析师",
+    pair_bull_debate: "多头辩论代理",
+    pair_bear_debate: "空头辩论代理",
     fx_risk_officer: "外汇风险分析师",
     debate_judge: "辩论裁决与外汇组合经理",
   }[canonicalAgentId(agentId)];

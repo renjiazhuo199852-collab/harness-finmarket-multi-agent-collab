@@ -14,8 +14,9 @@ import { SessionTransport, type SSEStatus } from "@/lib/sse";
 import { nextStreamingIdentity, streamingIdentityCopy, type StreamingIdentity } from "@/lib/streaming_identity";
 import { buildResearchProgress, dependencyAwareAgentStatus, stageAwareAgentStatus, type ProgressStageStatus, type ResearchProgressStage } from "@/lib/progress";
 import { activeSnapshot, applyRunEvent, emptyRunWorkspace, hydrateReportsFromMessages, hydrateRunSnapshot, markActiveRunCancelled, needsRunHydration, replaceRunSummaries, runIdFromEvent, selectRun as selectRunState } from "@/lib/run_workspace";
-import { isRunActive, settleCancellation } from "@/lib/run_controls";
+import { isRunActive, isSessionRunning, settleCancellation } from "@/lib/run_controls";
 import { AGENT_TEAM_CATEGORIES, agentResponsibility, agentRoleLabel, isCatalogVisible, isCorePreset, presetDisplay, taskLabel, variableLabels, type AgentTeamCategory } from "@/lib/swarmZhCN";
+import { isFinalReportReady } from "@/lib/workspace";
 import type { AgentSnapshot, DebateRunSummary, MessageItem, SessionEvent, SessionItem, SwarmPresetAgent, SwarmPresetDetail, SwarmPresetSummary, SwarmPresetTask, WorkspaceEvent, WorkspaceSnapshot, WorkspaceView } from "@/types";
 import "@/styles.css";
 
@@ -279,7 +280,7 @@ function ChatView({
         <h1>FX Debate Workspace</h1>
         <p>用自然语言发起 EURUSD 研究。对话保持 Vibe Trading 的节奏，协作过程会同步出现在工作区。</p>
         <div className="suggestions">
-          <button onClick={() => onView("chat")}>分析 EURUSD 未来两周走势，并给出风险可控的交易建议 <ArrowUpRight size={15} /></button>
+          <button onClick={() => onView("chat")}>请使用 FX Debate 团队分析 EUR/USD 未来两周走势，结合 4H 和 1D 周期，给出平衡风险偏好的交易建议，并明确入场、止损、止盈和失效条件。 <ArrowUpRight size={15} /></button>
           <button onClick={() => onView("canvas")}>查看本次请求的处理链路 <ArrowUpRight size={15} /></button>
         </div>
       </div>}
@@ -328,6 +329,20 @@ const FX_AGENT_UI: Record<string, {
     subtitle: "Pair Bear",
     description: "主动寻找下跌风险和反例，避免只看单一方向。",
     focus: "下行风险 · 阻力位",
+    icon: ArrowUpRight,
+  },
+  pair_bull_debate: {
+    title: "多头辩论代理",
+    subtitle: "Bull Debate",
+    description: "回应空头反证，复核多头观点仍可保留的证据。",
+    focus: "观点回应 · 证据复核",
+    icon: ArrowUpRight,
+  },
+  pair_bear_debate: {
+    title: "空头辩论代理",
+    subtitle: "Bear Debate",
+    description: "回应多头反证，复核空头观点仍可保留的证据。",
+    focus: "观点回应 · 风险复核",
     icon: ArrowUpRight,
   },
   macro_technical: {
@@ -423,6 +438,56 @@ function ObservedStage({ stage, index }: { stage: ResearchProgressStage; index: 
   </div>;
 }
 
+function DebateArena({ workspace, onSelect }: { workspace: WorkspaceSnapshot; onSelect: (agent: AgentSnapshot) => void }): ReactElement | null {
+  if (workspace.preset !== "fx_debate_team") return null;
+  const taskById = new Map(workspace.tasks.map((task) => [task.id, task]));
+  const agentForTask = (taskId: string): AgentSnapshot | undefined => workspace.agents.find((agent) => agent.taskId === taskId);
+  const macroTask = taskById.get("task-macro-technical");
+  const macroAgent = macroTask ? agentForTask(macroTask.id) : undefined;
+  const bullTask = taskById.get("task-bull-debate");
+  const bearTask = taskById.get("task-bear-debate");
+  if (!bullTask && !bearTask) return null;
+
+  const statusFor = (task: typeof bullTask, agent: AgentSnapshot | undefined): string => {
+    if (!task) return "pending";
+    return agent ? workspaceAgentStatus(workspace, agent) : task.status || "pending";
+  };
+  const outputFor = (task: typeof bullTask, agent: AgentSnapshot | undefined, empty: string): string => {
+    const output = agent?.output || task?.summary;
+    return output?.trim() || empty;
+  };
+  const readablePreview = (value: string, limit: number): string => {
+    const normalized = value.trim();
+    return normalized.length > limit ? `${normalized.slice(0, limit)}…` : normalized;
+  };
+  const macroStatus = macroAgent ? workspaceAgentStatus(workspace, macroAgent) : macroTask?.status || "pending";
+  const macroOutput = macroAgent?.output || macroTask?.summary;
+  const sides = [
+    { task: bullTask, agent: bullTask ? agentForTask(bullTask.id) : undefined, title: "多头回应", role: "pair_bull_debate", empty: "等待多头回应生成。" },
+    { task: bearTask, agent: bearTask ? agentForTask(bearTask.id) : undefined, title: "空头回应", role: "pair_bear_debate", empty: "等待空头回应生成。" },
+  ];
+  return <section className="debate-arena" aria-label="多空观点辩论">
+    <div className="debate-arena-head"><div><span className="eyebrow">DEBATE ARENA</span><h3>多空观点辩论</h3><p>宏观与技术背景已同步给双方，双方直接交叉回应；风险复核与最终裁决沿用原流程。</p></div><span className="debate-arena-badge"><Network size={14} />观点交锋</span></div>
+    <div className={`debate-context debate-status-${macroStatus}`}>
+      <div className="debate-context-head"><div><span className="debate-kicker">共享分析背景</span><strong>宏观与技术分析师</strong></div><StatusPill status={macroStatus} /></div>
+      <div className="debate-context-body">{macroOutput ? <MarkdownContent>{readablePreview(macroOutput, 1000)}</MarkdownContent> : <span>等待宏观与技术分析结果。</span>}</div>
+    </div>
+    <div className="debate-sides">
+      {sides.map(({ task, agent, title, role, empty }) => {
+        const status = statusFor(task, agent);
+        const output = outputFor(task, agent, empty);
+        const meta = FX_AGENT_UI[role];
+        const Icon = meta?.icon || ArrowUpRight;
+        return <button type="button" className={`debate-side debate-status-${status}`} key={role} onClick={() => { if (agent) onSelect(agent); }} disabled={!agent}>
+          <div className="debate-side-head"><span className="agent-icon"><Icon size={16} /></span><div><strong>{title}</strong><small>{meta?.subtitle || role}</small></div><StatusPill status={status} /></div>
+          <div className="debate-side-output">{output === empty ? <span className="debate-empty">{output}</span> : <MarkdownContent>{readablePreview(output, 1100)}</MarkdownContent>}</div>
+          <div className="debate-side-foot"><span>{meta?.focus || "观点回应"}</span><span>{agent ? "查看节点详情" : "等待前置观点"}</span></div>
+        </button>;
+      })}
+    </div>
+  </section>;
+}
+
 function CanvasView({ workspace, onSelect, selectedAgentId }: { workspace: WorkspaceSnapshot; onSelect: (agent: AgentSnapshot) => void; selectedAgentId?: string }): ReactElement {
   const progress = buildResearchProgress(workspace);
   const executionStages = progress.stages.filter((stage) => stage.kind === "execution");
@@ -448,6 +513,7 @@ function CanvasView({ workspace, onSelect, selectedAgentId }: { workspace: Works
   return <div className="workspace-view canvas-view">
     <div className="view-heading"><div><span className="eyebrow">DYNAMIC WORKFLOW</span><h2>{routeTitle} · 协作画布</h2><p>本次请求的实际处理链路由服务端路由结果决定。点击角色可查看该节点真实收到和输出的信息。</p></div><StatusPill status={workspace.status} /></div>
     <div className="canvas-context"><div><span>研究对象</span><strong>{target}</strong></div><div><span>分析周期</span><strong>{timeframe}</strong></div><div><span>处理路径</span><strong>{routeTitle}</strong><small className="route-id">{route}</small></div><div><span>当前阶段</span><strong>{progress.currentLabel}</strong></div><div><span>任务 / 事件</span><strong>{workspace.tasks.length} / {workspace.events.length}</strong></div></div>
+    <DebateArena workspace={workspace} onSelect={onSelect} />
     {beforeExecution.length > 0 && <div className="observed-flow" aria-label="运行准备阶段">{beforeExecution.map((stage, index) => <ObservedStage stage={stage} index={index} key={stage.id} />)}</div>}
     {executionStages.length === 0 ? <EmptyState title={workspace.status === "idle" ? "等待问题" : "等待服务端返回执行计划"} detail="这里不会预先放置固定 Agent；只有本次路由实际创建的任务才会出现在画布中。" /> : <div className="dynamic-dag" aria-label="服务端任务依赖图">
       {executionStages.map((stage, index) => <div className="dag-fragment" key={stage.id}>
@@ -523,7 +589,7 @@ type AgentCatalogEntry = {
   agent: SwarmPresetAgent;
 };
 
-const FX_CATALOG_AGENT_ORDER = ["pair_bull", "pair_bear", "macro_technical", "fx_risk_officer", "debate_judge"];
+const FX_CATALOG_AGENT_ORDER = ["pair_bull", "pair_bear", "pair_bull_debate", "pair_bear_debate", "macro_technical", "fx_risk_officer", "debate_judge"];
 
 function buildAgentCatalog(presets: SwarmPresetSummary[], details: Record<string, SwarmPresetDetail>): AgentCatalogEntry[] {
   return presets.flatMap((preset) => {
@@ -823,6 +889,14 @@ function FinalReportEditor({ runId, initialValue, onClose, onSaved }: { runId?: 
 
 function ReportView({ report, workspace, onSaved }: { report?: WorkspaceSnapshot["report"]; workspace: WorkspaceSnapshot; onSaved: (markdown: string) => void }): ReactElement {
   const [editing, setEditing] = useState(false);
+  if (!isFinalReportReady(workspace.status)) {
+    const detail = workspace.status === "failed"
+      ? workspace.lastError || "本次运行失败，请查看流程日志。"
+      : workspace.status === "cancelled"
+        ? "本次运行已停止，请查看流程日志。"
+        : "流程完成后显示最终报告。";
+    return <div className="workspace-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>最终结果由本次路由选中的实际处理链路生成。</p></div><StatusPill status={workspace.status} /></div><EmptyState title="最终报告尚未生成" detail={detail} /></div>;
+  }
   if (!report) return <div className="workspace-view"><div className="view-heading"><div><span className="eyebrow">最终结果</span><h2>最终报告</h2><p>最终结果由本次路由选中的实际处理链路生成。</p></div></div><EmptyState title="报告尚未生成" detail={workspace.status === "failed" ? workspace.lastError || "本次运行失败，请查看流程日志。" : "等待当前处理链路完成。"} /></div>;
   const agentReportItems = reportAgents(workspace);
   const downloadContent = buildReportDownloadHtml(report, agentReportItems, workspace.variables.target || workspace.variables.symbol);
@@ -981,6 +1055,14 @@ export default function App(): ReactElement {
     refreshSessions();
   }, [refreshSessions]);
 
+  // A session can keep running after the user switches to another one. Poll
+  // the sidebar status so parallel background runs remain visible without
+  // requiring the user to keep their SSE stream selected.
+  useEffect(() => {
+    const timer = window.setInterval(refreshSessions, 2000);
+    return () => window.clearInterval(timer);
+  }, [refreshSessions]);
+
   const consume = useCallback((event: SessionEvent) => {
     const eventAttemptId = typeof event.data.attempt_id === "string" ? event.data.attempt_id : undefined;
     setStreamingIdentity((current) => nextStreamingIdentity(current, event));
@@ -1030,8 +1112,10 @@ export default function App(): ReactElement {
     let active = true;
     setError("");
     setRunWorkspace(emptyRunWorkspace(sessionId));
-    void api.getSession(sessionId).then(() => {
+    void api.getSession(sessionId).then((session) => {
       if (!active) return;
+      setBusy(isSessionRunning(session.status));
+      setCancelling(false);
       void api.getMessages(sessionId).then((items) => {
         if (!active) return;
         setMessages(items);
@@ -1100,12 +1184,23 @@ export default function App(): ReactElement {
   }, [startNewConversation]);
 
   const openSession = useCallback((id: string) => {
+    if (id === sessionId) return;
     setError("");
     setActiveView("chat");
+    // The previous session is intentionally left running on the server. The
+    // new session gets its own status and event replay in the effect below.
+    setMessages([]);
+    setRunWorkspace(emptyRunWorkspace(id));
+    setStreamingText("");
+    setReasoning(false);
+    setBusy(false);
+    setCancelling(false);
+    activeAttemptId.current = null;
+    cancellationRequested.current = false;
     setStreamingIdentity("research-assistant");
     setSessionId(id);
     updateUrl({ session: id, run: undefined, view: "chat" });
-  }, []);
+  }, [sessionId]);
 
   const selectRun = useCallback((runId: string) => {
     setRunWorkspace((current) => selectRunState(current, runId));
@@ -1219,8 +1314,14 @@ export default function App(): ReactElement {
     }
   };
 
-  const debateExamplePrompt = "分析 EURUSD 未来两周走势。";
-  const latestRateExamplePrompt = "查询美元兑欧元最新汇率";
+  const promptExamples = [
+    {
+      label: "EUR/USD 两周走势 · FX Debate",
+      prompt: "请使用 FX Debate 团队分析 EUR/USD 未来两周走势，结合 4H 和 1D 周期，给出平衡风险偏好的交易建议，并明确入场、止损、止盈和失效条件。",
+    },
+    { label: "苹果公司最新财报", prompt: "请让团队协作分析苹果公司的最新财报。" },
+    { label: "USDJPY 两周走势", prompt: "分析 USDJPY 未来两周走势。" },
+  ];
   const backendConnection = BACKEND_CONNECTION_COPY[backendConnectionStatus];
 
   return <div className="app-shell">
@@ -1248,8 +1349,8 @@ export default function App(): ReactElement {
       {activeView === "settings" && <SettingsView />}
       </main>
     </div>
-    {activeView === "chat" && <footer className="composer-wrap"><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="描述你想研究的外汇问题…" rows={2} /><div className="composer-bottom"><div className="prompt-actions"><button className="prompt-button" onClick={() => setDraft(debateExamplePrompt)} title="填入 Debate 示例问题">{debateExamplePrompt}</button><button className="prompt-button" onClick={() => setDraft(latestRateExamplePrompt)} title="填入最新汇率查询示例">{latestRateExamplePrompt}</button></div><span>Enter 发送 · Shift+Enter 换行</span><button className="send-button" disabled={runActive || !draft.trim()} onClick={() => void send()} title={runActive ? "运行中" : "发送"}>{runActive ? <Square size={16} /> : <Send size={16} />}</button></div></div>{runActive && <button className="cancel-button" disabled={cancelling} onClick={() => void cancelRun()}><Square size={14} />{cancelling ? "正在停止…" : "停止运行"}</button>}</footer>}
+    {activeView === "chat" && <footer className="composer-wrap"><div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="描述你想研究的外汇问题…" rows={1} /><div className="composer-bottom"><div className="prompt-actions">{promptExamples.map((item) => <button className="prompt-button" key={item.prompt} onClick={() => setDraft(item.prompt)} title={`填入：${item.prompt}`}>{item.label}</button>)}</div><span>Enter 发送 · Shift+Enter 换行</span><button className="send-button" disabled={runActive || !draft.trim()} onClick={() => void send()} title={runActive ? "运行中" : "发送"}>{runActive ? <Square size={16} /> : <Send size={16} />}</button></div></div>{runActive && <button className="cancel-button" disabled={cancelling} onClick={() => void cancelRun()}><Square size={14} />{cancelling ? "正在停止…" : "停止运行"}</button>}</footer>}
     {selected && <DetailDrawer title={"role" in selected ? selected.role : selected.label} data={selected} events={workspace.events} workspaceStatus={workspace.status} onClose={() => setSelected(null)} />}
-    {workspace.status === "completed" && activeView === "chat" && workspace.report && <button className="floating-report" onClick={() => setView("report")}><FileText size={15} />查看最终报告</button>}
+    {isFinalReportReady(workspace.status) && activeView === "chat" && workspace.report && <button className="floating-report" onClick={() => setView("report")}><FileText size={15} />查看最终报告</button>}
   </div>;
 }

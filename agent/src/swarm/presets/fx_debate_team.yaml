@@ -1,6 +1,6 @@
 name: fx_debate_team
 title: "FX Debate Team"
-description: "Five-agent, evidence-scoped FX bull/bear debate with deterministic validation and risk control."
+description: "Seven-agent, evidence-scoped FX bull/bear debate with macro context, peer challenge, deterministic validation and risk control."
 
 agents:
   - id: pair_bull
@@ -160,6 +160,60 @@ agents:
     timeout_seconds: 600
     max_retries: 1
 
+  - id: pair_bull_debate
+    role: Pair Bull Debate
+    system_prompt: |
+      {upstream_context}
+
+      你是多头辩论代理。你不重新取数，也不生成新的交易建议；你的任务是基于宏观与技术分析师的背景、初始多头观点和初始空头观点，逐条回应空头的反证，说明哪些多头论点仍然成立、哪些需要让步、哪些证据还不能闭合。
+
+      ## 辩论边界
+      - 只使用 Upstream Context 中已有的报告和 evidence_id；不得调用外部行情、数据库或训练记忆补事实。
+      - 区分观察事实、推断和未决问题；不得把观点回应写成新的市场事实。
+      - 不修改上游报告，不新增 entry、stop、target、仓位、胜率或最终交易动作。
+      - 如果证据不足，明确保留为未决，不得为了“赢得辩论”强行选择方向。
+
+      ## 输出格式
+      输出简体中文 Markdown，包含：
+      1. 对空头核心论点的回应；
+      2. 仍可保留的多头 claim 与对应 evidence_id；
+      3. 需要让步或无法确认的部分；
+      4. 需要风险官继续复核的冲突点；
+      5. 一句话辩论状态（支持、弱支持、无法确认或被反证）。
+      这份回应供风险官和最终裁决读取，不是独立的 HypothesisArgumentV2，不要输出机器 JSON。
+    tools: [write_file]
+    skills: [fx-hypothesis-falsification]
+    max_iterations: 8
+    timeout_seconds: 600
+    max_retries: 1
+
+  - id: pair_bear_debate
+    role: Pair Bear Debate
+    system_prompt: |
+      {upstream_context}
+
+      你是空头辩论代理。你不重新取数，也不生成新的交易建议；你的任务是基于宏观与技术分析师的背景、初始空头观点和初始多头观点，逐条回应多头的反证，说明哪些空头论点仍然成立、哪些需要让步、哪些证据还不能闭合。
+
+      ## 辩论边界
+      - 只使用 Upstream Context 中已有的报告和 evidence_id；不得调用外部行情、数据库或训练记忆补事实。
+      - 区分观察事实、推断和未决问题；不得把观点回应写成新的市场事实。
+      - 不修改上游报告，不新增 entry、stop、target、仓位、胜率或最终交易动作。
+      - 如果证据不足，明确保留为未决，不得为了“赢得辩论”强行选择方向。
+
+      ## 输出格式
+      输出简体中文 Markdown，包含：
+      1. 对多头核心论点的回应；
+      2. 仍可保留的空头 claim 与对应 evidence_id；
+      3. 需要让步或无法确认的部分；
+      4. 需要风险官继续复核的冲突点；
+      5. 一句话辩论状态（支持、弱支持、无法确认或被反证）。
+      这份回应供风险官和最终裁决读取，不是独立的 HypothesisArgumentV2，不要输出机器 JSON。
+    tools: [write_file]
+    skills: [fx-hypothesis-falsification]
+    max_iterations: 8
+    timeout_seconds: 600
+    max_retries: 1
+
   - id: fx_risk_officer
     role: FX Risk Officer
     system_prompt: |
@@ -173,8 +227,8 @@ agents:
 
       {upstream_context}
 
-      你是独立 FX Risk Officer。完整读取两份 HypothesisArgumentV2 和一份 RelativeStateV2，
-      并在可用时接收三份完整 upstream_arguments，
+      你是独立 FX Risk Officer。完整读取两份 HypothesisArgumentV2、一份 RelativeStateV2 和多空辩论回应，
+      并在可用时接收三份完整 upstream_arguments；辩论回应只作为冲突与让步记录，不能替代原始证据，
       将 causal_chains/findings 视为上游 claims，汇总 evidence_id 后调用
       get_fx_evidence_by_ids 回查。审核不存在、过期、重复和冲突证据；证据不足时 allowed_actions
       只能包含 wait/hedge。单笔风险上限：conservative 0.25%、balanced 0.5%、aggressive 1.0%。
@@ -204,7 +258,7 @@ agents:
     system_prompt: |
       {upstream_context}
 
-      你是最终 Debate Judge / FX PM。读取三份 V2 前置分析和完整 risk_review / RiskReview，不按票数平均，
+      你是最终 Debate Judge / FX PM。读取三份 V2 前置分析、双方辩论回应和完整 risk_review / RiskReview，不按票数平均，
       但只能采用已登记证据。调用 get_fx_evidence_by_ids 回查 key_evidence_ids。本项目用于历史回测，
       最终 decision 必须在 long 与 short 中二选一，禁止输出 wait、hedge、neutral 或 base。方向选择按证据
       质量加权：综合来源可靠性、标的和期限相关性、数据新鲜度、覆盖完整性与冲突情况；证据较弱时降低
@@ -228,32 +282,6 @@ agents:
     max_retries: 1
 
 tasks:
-  - id: task-pair-bull
-    agent_id: pair_bull
-    prompt_template: |
-      对以下可信请求执行“上涨假设证伪”，生成详实 Markdown + pair_bull HypothesisArgumentV2。
-      请求目标只用于选择重点与解释期限，不得覆盖 manifest 降级规则。
-      resolved_request={resolved_request_json}
-      evidence_context={evidence_context_json}
-      evidence_context_id={evidence_context_id}
-      target={target}
-      timeframe={timeframe}
-      goal={goal}
-    depends_on: []
-
-  - id: task-pair-bear
-    agent_id: pair_bear
-    prompt_template: |
-      对以下可信请求执行“下跌假设证伪”，生成详实 Markdown + pair_bear HypothesisArgumentV2。
-      请求目标只用于选择重点与解释期限，不得覆盖 manifest 降级规则。
-      resolved_request={resolved_request_json}
-      evidence_context={evidence_context_json}
-      evidence_context_id={evidence_context_id}
-      target={target}
-      timeframe={timeframe}
-      goal={goal}
-    depends_on: []
-
   - id: task-macro-technical
     agent_id: macro_technical
     prompt_template: |
@@ -267,36 +295,98 @@ tasks:
       goal={goal}
     depends_on: []
 
-  - id: task-risk
-    agent_id: fx_risk_officer
+  - id: task-pair-bull
+    agent_id: pair_bull
     prompt_template: |
-      审核 Upstream Context 中两份 HypothesisArgumentV2 和一份 RelativeStateV2，生成 RiskReview。
-      evidence_context={evidence_context_json}
-      evidence_context_id={evidence_context_id}
-      target={target}
-      timeframe={timeframe}
-      goal={goal}
-    depends_on: [task-pair-bull, task-pair-bear, task-macro-technical]
-    input_from:
-      bull_argument: task-pair-bull
-      bear_argument: task-pair-bear
-      macro_technical_argument: task-macro-technical
-
-  - id: task-judge
-    agent_id: debate_judge
-    prompt_template: |
-      综合 Upstream Context 中三份 V2 分析和 RiskReview，生成唯一 FinalDecision。
+      对以下可信请求执行“上涨假设证伪”，生成详实 Markdown + pair_bull HypothesisArgumentV2。
+      请求目标只用于选择重点与解释期限，不得覆盖 manifest 降级规则。
       resolved_request={resolved_request_json}
       evidence_context={evidence_context_json}
       evidence_context_id={evidence_context_id}
       target={target}
       timeframe={timeframe}
       goal={goal}
-    depends_on: [task-pair-bull, task-pair-bear, task-macro-technical, task-risk]
+    depends_on: [task-macro-technical]
+    input_from:
+      macro_technical_argument: task-macro-technical
+
+  - id: task-pair-bear
+    agent_id: pair_bear
+    prompt_template: |
+      对以下可信请求执行“下跌假设证伪”，生成详实 Markdown + pair_bear HypothesisArgumentV2。
+      请求目标只用于选择重点与解释期限，不得覆盖 manifest 降级规则。
+      resolved_request={resolved_request_json}
+      evidence_context={evidence_context_json}
+      evidence_context_id={evidence_context_id}
+      target={target}
+      timeframe={timeframe}
+      goal={goal}
+    depends_on: [task-macro-technical]
+    input_from:
+      macro_technical_argument: task-macro-technical
+
+  - id: task-bull-debate
+    agent_id: pair_bull_debate
+    prompt_template: |
+      基于 Upstream Context 中的宏观技术背景、初始多头观点和初始空头观点，回应空头反证并形成多头辩论回应。
+      只输出简体中文 Markdown，不输出机器 JSON，不新增交易点位。
+      target={target}
+      timeframe={timeframe}
+      goal={goal}
+    depends_on: [task-macro-technical, task-pair-bull, task-pair-bear]
+    input_from:
+      macro_technical_argument: task-macro-technical
+      bull_argument: task-pair-bull
+      bear_argument: task-pair-bear
+
+  - id: task-bear-debate
+    agent_id: pair_bear_debate
+    prompt_template: |
+      基于 Upstream Context 中的宏观技术背景、初始多头观点和初始空头观点，回应多头反证并形成空头辩论回应。
+      只输出简体中文 Markdown，不输出机器 JSON，不新增交易点位。
+      target={target}
+      timeframe={timeframe}
+      goal={goal}
+    depends_on: [task-macro-technical, task-pair-bull, task-pair-bear]
+    input_from:
+      macro_technical_argument: task-macro-technical
+      bull_argument: task-pair-bull
+      bear_argument: task-pair-bear
+
+  - id: task-risk
+    agent_id: fx_risk_officer
+    prompt_template: |
+      审核 Upstream Context 中两份 HypothesisArgumentV2、一份 RelativeStateV2 和双方辩论回应，生成 RiskReview。
+      evidence_context={evidence_context_json}
+      evidence_context_id={evidence_context_id}
+      target={target}
+      timeframe={timeframe}
+      goal={goal}
+    depends_on: [task-macro-technical, task-pair-bull, task-pair-bear, task-bull-debate, task-bear-debate]
     input_from:
       bull_argument: task-pair-bull
       bear_argument: task-pair-bear
       macro_technical_argument: task-macro-technical
+      bull_debate: task-bull-debate
+      bear_debate: task-bear-debate
+
+  - id: task-judge
+    agent_id: debate_judge
+    prompt_template: |
+      综合 Upstream Context 中三份 V2 分析、双方辩论回应和 RiskReview，生成唯一 FinalDecision。
+      resolved_request={resolved_request_json}
+      evidence_context={evidence_context_json}
+      evidence_context_id={evidence_context_id}
+      target={target}
+      timeframe={timeframe}
+      goal={goal}
+    depends_on: [task-macro-technical, task-pair-bull, task-pair-bear, task-bull-debate, task-bear-debate, task-risk]
+    input_from:
+      bull_argument: task-pair-bull
+      bear_argument: task-pair-bear
+      macro_technical_argument: task-macro-technical
+      bull_debate: task-bull-debate
+      bear_debate: task-bear-debate
       risk_review: task-risk
 
 variables:

@@ -372,9 +372,15 @@ def test_run_fx_debate_builds_context_validates_dag_outputs_and_renders_report(
     assert output["decision"]["canonical_symbol"] == "EURUSD"
     assert output["decision"]["confidence"] == 0.35
     assert output["decision"]["presentation"]["data_quality"] == "degraded"
+    generated_plan = output["decision"]["trade_plan"]
+    assert generated_plan["entry_zone"] is not None
+    assert generated_plan["stop_loss"] is not None
+    assert len(generated_plan["targets"]) == 2
     assert "技术确认" in output["report_markdown"]
     assert "# EUR/USD 外汇 Debate 结论" in output["report_markdown"]
     assert "当前回测方向：做空" in output["report_markdown"]
+    assert "置信度" not in output["report_markdown"]
+    assert "confidence" not in output["report_markdown"].lower()
     assert "本地只读 Excel 冻结证据包" in output["report_markdown"]
     assert "研究辅助输出" not in output["report_markdown"]
     assert orchestrator.called is True
@@ -447,7 +453,7 @@ def test_authorized_non_fx_attempt_cannot_call_fx_tool(tmp_path) -> None:
     assert orchestrator.called is False
 
 
-def test_degraded_technical_confirmation_preserves_direction_and_clears_levels() -> None:
+def test_degraded_technical_confirmation_preserves_direction_and_generates_levels() -> None:
     decision = FinalDecision.model_validate(
         {
             "evidence_context_id": "fxctx-test",
@@ -497,9 +503,12 @@ def test_degraded_technical_confirmation_preserves_direction_and_clears_levels()
 
     assert result.decision == "long"
     assert result.confidence == 0.35
-    assert result.trade_plan.entry_zone is None
-    assert result.trade_plan.stop_loss is None
-    assert result.trade_plan.targets == []
+    assert result.trade_plan.entry_zone is not None
+    assert result.trade_plan.entry_zone[0] < result.trade_plan.entry_zone[1]
+    assert result.trade_plan.stop_loss is not None
+    assert result.trade_plan.stop_loss < result.trade_plan.entry_zone[0]
+    assert len(result.trade_plan.targets) == 2
+    assert result.trade_plan.targets[0] > result.trade_plan.entry_zone[1]
 
 
 def test_backtest_direction_uses_weighted_evidence_for_wait_fallback() -> None:
@@ -526,7 +535,7 @@ def test_backtest_direction_uses_weighted_evidence_for_wait_fallback() -> None:
 
 
 def test_run_fx_debate_normalizes_common_planner_option_aliases(tmp_path) -> None:
-    """Model-emitted medium/zh aliases must not fail before routing starts."""
+    """Model-emitted risk/language aliases must not fail before routing starts."""
     output = json.loads(
         RunFxDebateTool(
             orchestrator=_FakeOrchestrator(tmp_path),
@@ -544,6 +553,14 @@ def test_run_fx_debate_normalizes_common_planner_option_aliases(tmp_path) -> Non
     )
 
     assert output["ok"] is True
+
+
+def test_run_fx_debate_normalizes_neutral_risk_alias() -> None:
+    options = RunOptions.model_validate(
+        _normalize_run_options({"risk_profile": "neutral"})
+    )
+
+    assert options.risk_profile == "balanced"
 
 
 def test_run_fx_debate_rejects_ambiguous_public_and_legacy_inputs(tmp_path) -> None:

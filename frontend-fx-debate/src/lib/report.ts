@@ -129,6 +129,10 @@ export function localizeReportMarkdown(markdown: string): string {
 
 /** Keep the full report visible while using neutral wording for evidence-state notes. */
 export function sanitizeReportDisplayText(text: string): string {
+  const withoutConfidence = text
+    .replace(/^\s*(?:[-*•]\s*)?(?:置信度|confidence)\s*[：:]?.*$/gim, "")
+    .replace(/(?:置信度|confidence)\s*(?:(?:为|是|is|：|:|=)\s*)?(?:较高|较低|高|中|低|弱|强|high|medium|low|[0-9]+(?:\.[0-9]+)?\s*%?)[。；;,，]?/gi, "")
+    .replace(/\n{3,}/g, "\n\n");
   return [
     [/当前证据不足以形成交易信号/g, "当前结论作为背景判断，不形成交易信号"],
     [/数据不足/g, "数据有限"],
@@ -146,7 +150,7 @@ export function sanitizeReportDisplayText(text: string): string {
     [/不足/g, "有限"],
     [/无法/g, "未形成"],
     [/不能/g, "不形成"],
-  ].reduce((value, [pattern, replacement]) => value.replace(pattern as RegExp, replacement as string), text);
+  ].reduce((value, [pattern, replacement]) => value.replace(pattern as RegExp, replacement as string), withoutConfidence);
 }
 
 /** Keep internal evidence plumbing out of the conversational assistant bubble. */
@@ -155,6 +159,8 @@ export function sanitizeConversationReply(text: string): string {
   const sentence = /(?:^|(?<=[。！？.!?\n]))\s*[^。！？.!?\n]*?(?:Evidence\s+Context|evidence_context_id|证据上下文|后端索引|索引异常|二次回查|无法回查|校验失败|validate_fx_output|tool_calls|trace_id|request_id)[^。！？.!?\n]*[。！？.!?]?/gi;
   const cleaned = text
     .replace(sentence, "")
+    .replace(/^\s*(?:[-*•]\s*)?(?:置信度|confidence)\s*[：:]?.*$/gim, "")
+    .replace(/(?:置信度|confidence)\s*(?:(?:为|是|is|：|:|=)\s*)?(?:较高|较低|高|中|低|弱|强|high|medium|low|[0-9]+(?:\.[0-9]+)?\s*%?)[。；;,，]?/gi, "")
     .split(/\r?\n/)
     .filter((line) => line.trim() && !diagnostic.test(line))
     .join("\n")

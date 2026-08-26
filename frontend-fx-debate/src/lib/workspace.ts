@@ -14,7 +14,7 @@ import type {
   WorkspaceSnapshot,
 } from "@/types";
 
-export const FX_AGENT_ORDER = ["pair_bull", "pair_bear", "macro_technical", "fx_risk_officer", "debate_judge"];
+export const FX_AGENT_ORDER = ["pair_bull", "pair_bear", "pair_bull_debate", "pair_bear_debate", "macro_technical", "fx_risk_officer", "debate_judge"];
 
 const FX_REPORT_AGENT_ORDER = ["pair_bull", "pair_bear", "macro_technical", "fx_risk_officer"];
 const FX_REPORT_ROLE_LABELS: Record<string, string> = {
@@ -27,6 +27,8 @@ const FX_REPORT_ROLE_LABELS: Record<string, string> = {
 export const FX_AGENT_DEFINITIONS: AgentSnapshot[] = [
   { id: "pair_bull", role: "Pair Bull", status: "pending" },
   { id: "pair_bear", role: "Pair Bear", status: "pending" },
+  { id: "pair_bull_debate", role: "Pair Bull Debate", status: "pending" },
+  { id: "pair_bear_debate", role: "Pair Bear Debate", status: "pending" },
   { id: "macro_technical", role: "Macro + Technical", status: "pending" },
   { id: "fx_risk_officer", role: "FX Risk Officer", status: "pending" },
   { id: "debate_judge", role: "Debate Judge / FX PM", status: "pending" },
@@ -42,6 +44,14 @@ export function emptySnapshot(sessionId?: string): WorkspaceSnapshot {
     events: [],
     evidence: { items: [] },
   };
+}
+
+/**
+ * A report payload can arrive before the terminal run event. It is still an
+ * intermediate artifact until the workflow has completed successfully.
+ */
+export function isFinalReportReady(status: WorkspaceSnapshot["status"]): boolean {
+  return status === "completed";
 }
 
 function asString(value: unknown): string | undefined {
@@ -263,8 +273,10 @@ function extractReport(data: unknown): FxReport | undefined {
       if (structured) return { ...structured, markdown, raw: data };
     }
     const inferredDecision = inferDecisionFromMarkdown(markdown);
+    const inferredTradePlan = inferTradePlanFromMarkdown(markdown);
     return {
       ...(inferredDecision ? { direction: inferredDecision.direction, action: inferredDecision.action } : {}),
+      ...inferredTradePlan,
       markdown,
       raw: data,
     };
@@ -359,6 +371,24 @@ function inferDecisionFromMarkdown(markdown: string): { direction: string; actio
     /(?:当前回测方向|决策)\s*[：:]\s*(做多|看涨|long|做空|看跌|short)(?:\s*[（(]\s*(long|short)\s*[）)])?/im,
   );
   return displayDecision(match?.[2] || match?.[1]);
+}
+
+function inferTradePlanFromMarkdown(markdown: string): Pick<FxReport, "entry" | "stopLoss" | "takeProfit"> {
+  const match = markdown.match(
+    /入场\s*([0-9]+(?:\.[0-9]+)?)\s*[–—-]\s*([0-9]+(?:\.[0-9]+)?)\s*[，,;；]\s*止损\s*([0-9]+(?:\.[0-9]+)?)\s*[，,;；]\s*(?:目标|止盈)\s*([^。\n]+)/i,
+  );
+  if (!match || [match[1], match[2], match[3]].some((value) => !value || value === "未生成")) {
+    return {};
+  }
+  const targets = match[4]
+    .replace(/[。；;，,]+$/g, "")
+    .trim();
+  if (!targets || targets === "未生成") return {};
+  return {
+    entry: `${match[1]}–${match[2]}`,
+    stopLoss: match[3],
+    takeProfit: targets,
+  };
 }
 
 const EVIDENCE_DOMAINS = ["market", "technical", "macro", "news", "mcp"] as const;

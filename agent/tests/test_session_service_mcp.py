@@ -208,6 +208,21 @@ def test_conversation_reply_hides_internal_evidence_diagnostics() -> None:
     assert "后端索引" not in _sanitize_user_reply(reply)
 
 
+def test_conversation_reply_hides_confidence_but_keeps_direction() -> None:
+    attempt = Attempt(
+        session_id="session-1",
+        attempt_id="attempt-1",
+        summary="最终方向：做空。置信度较低，confidence: 35%。",
+    )
+    attempt.mark_completed(summary=attempt.summary or "")
+
+    reply = SessionService._format_result_message(attempt)
+
+    assert reply == "最终方向：做空。"
+    assert "置信度" not in reply
+    assert "confidence" not in reply.lower()
+
+
 def test_reconcile_incomplete_attempts_marks_restart_orphans_cancelled(tmp_path: Path) -> None:
     service = SessionService(
         store=SessionStore(tmp_path / "sessions"),

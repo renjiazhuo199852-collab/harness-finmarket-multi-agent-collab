@@ -9,15 +9,17 @@ from src.swarm.presets import inspect_preset, load_preset
 from src.swarm.worker import build_worker_prompt
 
 
-def test_fx_debate_preset_has_three_stage_five_agent_dag() -> None:
+def test_fx_debate_preset_has_macro_first_debate_and_risk_dag() -> None:
     report = inspect_preset("fx_debate_team")
 
     assert report["valid"] is True
     assert report["errors"] == []
-    assert len(report["agents"]) == 5
+    assert len(report["agents"]) == 7
     assert report["variables"] == ["goal", "target", "timeframe"]
     assert [[task["agent_id"] for task in layer] for layer in report["layers"]] == [
-        ["pair_bull", "pair_bear", "macro_technical"],
+        ["macro_technical"],
+        ["pair_bull", "pair_bear"],
+        ["pair_bull_debate", "pair_bear_debate"],
         ["fx_risk_officer"],
         ["debate_judge"],
     ]
@@ -130,6 +132,34 @@ def test_bull_and_bear_prompts_keep_symmetric_quality_gates() -> None:
     for gate in shared_gates:
         assert gate in prompts["pair_bull"]
         assert gate in prompts["pair_bear"]
+
+
+def test_debate_agents_only_consume_upstream_and_feed_risk_and_judge() -> None:
+    preset = load_preset("fx_debate_team")
+    agents = {agent["id"]: agent for agent in preset["agents"]}
+    tasks = {task["id"]: task for task in preset["tasks"]}
+
+    for agent_id in ("pair_bull_debate", "pair_bear_debate"):
+        assert agents[agent_id]["tools"] == ["write_file"]
+        assert "Upstream Context" in agents[agent_id]["system_prompt"]
+        assert "不要输出机器 JSON" in agents[agent_id]["system_prompt"]
+
+    assert tasks["task-pair-bull"]["input_from"] == {
+        "macro_technical_argument": "task-macro-technical",
+    }
+    assert tasks["task-pair-bear"]["input_from"] == {
+        "macro_technical_argument": "task-macro-technical",
+    }
+    for task_id in ("task-bull-debate", "task-bear-debate"):
+        assert tasks[task_id]["input_from"] == {
+            "macro_technical_argument": "task-macro-technical",
+            "bull_argument": "task-pair-bull",
+            "bear_argument": "task-pair-bear",
+        }
+    assert tasks["task-risk"]["input_from"]["bull_debate"] == "task-bull-debate"
+    assert tasks["task-risk"]["input_from"]["bear_debate"] == "task-bear-debate"
+    assert tasks["task-judge"]["input_from"]["bull_debate"] == "task-bull-debate"
+    assert tasks["task-judge"]["input_from"]["bear_debate"] == "task-bear-debate"
 
 
 def test_upstream_context_is_injected_even_without_template_placeholder() -> None:

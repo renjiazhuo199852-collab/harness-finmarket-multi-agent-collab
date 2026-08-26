@@ -76,6 +76,18 @@ describe("report presentation helpers", () => {
     expect(displayed).not.toContain("无法判断");
   });
 
+  it("does not show confidence in visible report text or conversation text", () => {
+    const report = sanitizeReportDisplayText("- 决策：做空\n- 置信度：35%\n核心判断：宏观偏空。\n方向置信度较低。\n");
+    const reply = sanitizeConversationReply("最终方向：做空。置信度较低，confidence: 35%。");
+
+    expect(report).toContain("决策：做空");
+    expect(report).toContain("核心判断：宏观偏空");
+    expect(report).not.toContain("置信度");
+    expect(reply).toBe("最终方向：做空。");
+    expect(reply).not.toContain("confidence");
+    expect(reply).not.toContain("置信度");
+  });
+
   it("hides internal evidence lookup diagnostics from the conversation reply", () => {
     const displayed = sanitizeConversationReply(
       "EURUSD 回测结论为做空。Evidence Context 后端索引异常，无法二次回查。请查看最终报告。",
