@@ -6,6 +6,7 @@ import ipaddress
 from types import SimpleNamespace
 
 import pytest
+from starlette.requests import Request
 from fastapi.testclient import TestClient
 
 import api_server
@@ -494,6 +495,29 @@ def test_cors_origins_accept_explicit_remote_origins() -> None:
     origins = api_server._parse_cors_origins(" https://app.example.com,https://admin.example.com ")
 
     assert origins == ["https://app.example.com", "https://admin.example.com"]
+
+
+def test_configured_cors_origin_is_allowed_for_proxy_browser_posts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit public UI origin may proxy unsafe requests to the API."""
+    monkeypatch.setenv("CORS_ORIGINS", "http://public.example:5899")
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/sessions",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"127.0.0.1:8899"),
+            (b"origin", b"http://public.example:5899"),
+            (b"sec-fetch-site", b"cross-site"),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8899),
+    })
+
+    api_server._reject_cross_site_browser_request(request)
 
 
 def test_loopback_shutdown_requires_bearer_when_api_key_configured(

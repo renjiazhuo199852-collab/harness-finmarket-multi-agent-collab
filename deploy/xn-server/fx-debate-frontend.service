@@ -1,0 +1,19 @@
+[Unit]
+Description=FX Debate Frontend (native Vite, no Docker)
+Wants=network-online.target
+After=network-online.target fx-debate-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/project/fx-debate-server/app/frontend-fx-debate
+Environment=PATH=/root/.nvm/versions/node/v22.22.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=VITE_API_URL=
+ExecStart=/root/.nvm/versions/node/v22.22.1/bin/npm run dev -- --host 0.0.0.0 --port 5899
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+[Unit]
+Description=FX Debate API (native Python, no Docker)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/project/fx-debate-server/app
+EnvironmentFile=-/root/project/fx-debate-server/app/agent/.env
+Environment=PYTHONPATH=/root/project/fx-debate-server/app/agent
+Environment=FX_DEBATE_DATA_SOURCE=ai_search
+Environment=FX_DATA_SERVICE_ENABLED=1
+Environment=FX_DATA_SERVICE_TIMEOUT_SECONDS=120
+Environment=FX_DATA_SERVICE_MAX_ROWS=250
+Environment=FX_DATA_MCP_SERVER_MODULE=backend.mcp_server
+Environment=FX_DATA_MCP_WORKING_DIRECTORY=/root/project/fx-debate-server/app/external/market-data-tools
+Environment=FX_DATA_MCP_TIMEOUT_SECONDS=120
+ExecStart=/root/project/fx-debate-server/venv/bin/python -m uvicorn --app-dir /root/project/fx-debate-server/app/agent api_server:app --host 127.0.0.1 --port 8899
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -46,6 +46,7 @@ from src.api.security import (  # noqa: F401, E402
     _env_shell_tools_enabled,
     _host_without_port,
     _is_allowed_loopback_host,
+    _is_configured_cors_origin,
     _is_local_client,
     _is_loopback_bind_host,
     _is_loopback_origin,

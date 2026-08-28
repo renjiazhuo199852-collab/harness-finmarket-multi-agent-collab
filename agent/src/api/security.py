@@ -337,14 +337,31 @@ def _origin_matches_request_host(origin: str, request: Request) -> bool:
     return origin_port == request_port
 
 
+def _is_configured_cors_origin(origin: str) -> bool:
+    """Return whether *origin* is an explicitly trusted browser UI origin.
+
+    Public frontends commonly reach the loopback-bound API through a reverse
+    proxy or Vite proxy. In that arrangement the browser's Fetch Metadata
+    header is ``cross-site`` even though the origin was deliberately allowed
+    by ``CORS_ORIGINS``. Keep the allow-list explicit while permitting that
+    supported deployment topology.
+    """
+    return origin in _get_cors_origins()
+
+
 def _reject_cross_site_browser_request(request: Request) -> None:
     """Reject unsafe browser requests from untrusted cross-site origins."""
     sec_fetch_site = request.headers.get("sec-fetch-site", "").lower()
-    if sec_fetch_site == "cross-site":
+    origin = request.headers.get("origin")
+    configured_origin = bool(origin and _is_configured_cors_origin(origin))
+    if sec_fetch_site == "cross-site" and not configured_origin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-site request denied")
 
-    origin = request.headers.get("origin")
-    if origin and not (_is_loopback_origin(origin) or _origin_matches_request_host(origin, request)):
+    if origin and not (
+        _is_loopback_origin(origin)
+        or _origin_matches_request_host(origin, request)
+        or configured_origin
+    ):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-site request denied")
 
 

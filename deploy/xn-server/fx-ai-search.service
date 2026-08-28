@@ -1,0 +1,18 @@
+[Unit]
+Description=AI Search HTTP compatibility service (optional, MCP is on-demand)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/project/fx-debate-server/app/external/market-data-tools
+EnvironmentFile=-/root/project/fx-debate-server/app/external/market-data-tools/.env
+ExecStart=/root/project/fx-debate-server/venv/bin/python -m uvicorn --app-dir /root/project/fx-debate-server/app/external/market-data-tools backend.main:app --host 127.0.0.1 --port 8011
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
